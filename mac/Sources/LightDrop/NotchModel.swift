@@ -1,0 +1,286 @@
+import AppKit
+import QuickLookThumbnailing
+import SwiftUI
+
+/// Everything the island shows, driven by the drag watcher and the drop.
+@MainActor
+final class NotchModel: ObservableObject {
+    enum Phase: Equatable { case idle, near, hover, sending, sent, failed }
+
+    @Published var phase: Phase = .idle {
+        didSet { if phase != oldValue { kick(phase == .sent || phase == .failed ? 1 : 0.7) } }
+    }
+    /// The last jiggle: when and how hard (the outline ripples, then settles).
+    @Published var kickedAt = Date.distantPast
+    @Published var kickStrength = 0.0
+    /// 0 (far) … 1 (at the notch) while a file is dragged nearby.
+    @Published var proximity: CGFloat = 0
+    /// Where the cursor is across the island, -1 (left) … 1 (right); the bottom edge leans to it.
+    @Published var pull: CGFloat = 0
+    @Published var targets: [Peer] = []
+    @Published var loadingTargets = false
+    /// The device pill under the cursor when there are several.
+    @Published var hovered: Peer? {
+        didSet { if hovered != oldValue, hovered != nil { kick(0.4) } }
+    }
+    @Published var progress: Double = 0
+    @Published var title = ""
+    @Published var detail = ""
+    /// What is being dragged: a preview of the first file and how many there are.
+    @Published var thumbnail: NSImage?
+    @Published var fileCount = 0
+    @Published var fileName = ""
+    /// Owners' profile pictures by URL.
+    @Published var photos: [String: NSImage] = [:]
+    /// Bumped on failure to shake the island.
+    @Published var shakes = 0
+
+    let notchSize: CGSize
+    let hasNotch: Bool
+    private var lastLoad = Date.distantPast
+    private var resetTask: Task<Void, Never>?
+
+    init(notchSize: CGSize, hasNotch: Bool) {
+        self.notchSize = notchSize
+        self.hasNotch = hasNotch
+        if let pic = lastPic, let img = NSImage(contentsOf: Self.cacheFile(pic)) { photos[pic] = img }
+    }
+
+    /// Who drops go to, by first name ("Sam", or "Sam & Kim").
+    var recipient: String {
+        var seen = Set<String>(), people: [String] = []
+        for p in targets.map(\.person) where seen.insert(p).inserted { people.append(p) }
+        if people.isEmpty { return UserDefaults.standard.string(forKey: "lastRecipient") ?? "" }
+        return people.joined(separator: " & ")
+    }
+
+    /// The recipient's photo, when they have one; the last one seen while nobody's online.
+    var recipientPhoto: NSImage? {
+        ((hovered ?? targets.first)?.pic ?? (targets.isEmpty ? lastPic : nil)).flatMap { photos[$0] }
+    }
+
+    /// The last recipient's photo URL, remembered across launches.
+    var lastPic: String? {
+        get { UserDefaults.standard.string(forKey: "lastRecipientPic") }
+        set { UserDefaults.standard.set(newValue, forKey: "lastRecipientPic") }
+    }
+
+    private static let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("LightDrop", isDirectory: true)
+
+    private static func cacheFile(_ url: String) -> URL {
+        let name = Data(url.utf8).base64EncodedString().replacingOccurrences(of: "/", with: "_").suffix(120)
+        return cache.appendingPathComponent(String(name))
+    }
+
+    func kick(_ strength: Double) {
+        kickedAt = Date()
+        kickStrength = strength
+    }
+
+    var busy: Bool { phase == .sending || phase == .sent || phase == .failed }
+
+    // MARK: drag
+
+    func dragBegan(urls: [URL]) {
+        guard !busy else { return }
+        fileCount = urls.count
+        fileName = urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) items"
+        thumbnail = urls.first.map { NSWorkspace.shared.icon(forFile: $0.path) }
+        if let first = urls.first { loadThumbnail(first) }
+        refreshTargets()
+    }
+
+    func dragMoved(proximity p: CGFloat, lean: CGFloat) {
+        guard !busy, phase != .hover else { return }
+        withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.62)) {
+            proximity = p
+            pull = lean
+            phase = p > 0 ? .near : .idle
+        }
+    }
+
+    /// Cursor position over the open island, -1 … 1.
+    func hoverMoved(_ x: CGFloat) {
+        guard phase == .hover else { return }
+        withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.55)) { pull = x }
+    }
+
+    func dragEnded() {
+        guard !busy else { return }
+        collapse()
+    }
+
+    func hover(_ inside: Bool) {
+        guard !busy else { return }
+        if inside, phase != .hover { Haptics.tap() }
+        withAnimation(.spring(response: 0.46, dampingFraction: 0.6)) {
+            phase = inside ? .hover : (proximity > 0 ? .near : .idle)
+            if !inside { hovered = nil }
+        }
+    }
+
+    func refreshTargets() {
+        guard Date().timeIntervalSince(lastLoad) > 4, !loadingTargets else { return }
+        lastLoad = Date()
+        loadingTargets = true
+        Task {
+            let found = (try? await Lightdrop.targets()) ?? []
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                targets = found
+                loadingTargets = false
+            }
+            if let first = found.first {
+                UserDefaults.standard.set(first.person, forKey: "lastRecipient")
+                lastPic = first.pic
+            }
+            for url in Set(found.compactMap(\.pic)) where photos[url] == nil { loadPhoto(url) }
+        }
+    }
+
+    private func loadPhoto(_ url: String) {
+        guard let u = URL(string: url) else { return }
+        Task {
+            guard let (data, _) = try? await URLSession.shared.data(from: u), let img = NSImage(data: data) else { return }
+            try? FileManager.default.createDirectory(at: Self.cache, withIntermediateDirectories: true)
+            try? data.write(to: Self.cacheFile(url))
+            withAnimation(.easeOut(duration: 0.25)) { photos[url] = img }
+        }
+    }
+
+    /// The file's Quick Look preview (the actual photo, page, …), replacing its icon when ready.
+    private func loadThumbnail(_ url: URL) {
+        let req = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 96, height: 96),
+                                               scale: NSScreen.main?.backingScaleFactor ?? 2,
+                                               representationTypes: [.lowQualityThumbnail, .thumbnail])
+        QLThumbnailGenerator.shared.generateRepresentations(for: req) { rep, _, _ in
+            guard let img = rep?.nsImage else { return }
+            Task { @MainActor in
+                guard self.fileName == url.lastPathComponent || self.fileCount > 1 else { return }
+                withAnimation(.easeOut(duration: 0.2)) { self.thumbnail = img }
+            }
+        }
+    }
+
+    // MARK: drop
+
+    /// Accepts a drop when someone is receiving; `peer` is the pill it landed on.
+    func drop(_ urls: [URL], on peer: Peer?) -> Bool {
+        guard !urls.isEmpty, !busy, let to = peer ?? (targets.count == 1 ? targets.first : nil) else {
+            if targets.isEmpty { fail(recipient.isEmpty ? "Nobody is receiving right now" : "\(recipient) isn't online") }
+            return false
+        }
+        if peer != nil { hovered = peer }
+        let name = urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) items"
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.66)) {
+            phase = .sending
+            progress = 0
+            pull = 0
+            title = name
+            detail = to.person
+        }
+        var done = 0
+        Task {
+            do {
+                try await Lightdrop.send(urls, to: to) { ev in
+                    switch ev {
+                    case let .progress(_, sent, total):
+                        let part = total > 0 ? min(Double(sent) / Double(total), 1) : 1
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            self.progress = (Double(done) + part) / Double(urls.count)
+                        }
+                    case .sent:
+                        done += 1
+                    }
+                }
+                succeed(to: to, name: name)
+            } catch {
+                fail(error.localizedDescription)
+            }
+        }
+        return true
+    }
+
+    /// `LightDrop --demo <file>`: plays approach, hover, send and delivered on its
+    /// own (no mouse, nothing sent), to watch or record the motion.
+    func playDemo(file: URL) async {
+        func wait(_ s: Double) async { try? await Task.sleep(nanoseconds: UInt64(s * 1e9)) }
+        lastLoad = .distantPast
+        dragBegan(urls: [file])
+        await wait(0.6)
+        for i in 0...40 {
+            let t = CGFloat(i) / 40
+            dragMoved(proximity: t, lean: 8 * sin(t * 3))
+            await wait(0.025)
+        }
+        hover(true)
+        for i in 0...90 {
+            hoverMoved(sin(Double(i) / 90 * .pi * 2) * 0.8)
+            await wait(0.02)
+        }
+        await wait(0.4)
+        let to = targets.first ?? Peer(name: "macbook", ip: "", owner: recipient, receiving: true, pic: lastPic)
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.66)) {
+            phase = .sending
+            progress = 0
+            pull = 0
+            title = fileName
+            detail = to.person
+        }
+        for i in 1...30 {
+            withAnimation(.easeOut(duration: 0.2)) { progress = Double(i) / 30 }
+            await wait(0.04)
+        }
+        succeed(to: to, name: fileName)
+        await wait(3)
+        exit(0)
+    }
+
+    private func succeed(to: Peer, name: String) {
+        Haptics.success()
+        NSSound(named: "Pop")?.play()
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.5)) {
+            progress = 1
+            phase = .sent
+            title = "Delivered to \(to.person)"
+            detail = name
+        }
+        scheduleCollapse(after: 1.8)
+    }
+
+    private func fail(_ message: String) {
+        Haptics.tap()
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.62)) {
+            phase = .failed
+            title = "Couldn't send"
+            detail = message
+            pull = 0
+        }
+        withAnimation(.linear(duration: 0.5)) { shakes += 1 }
+        scheduleCollapse(after: 3)
+    }
+
+    private func scheduleCollapse(after seconds: Double) {
+        resetTask?.cancel()
+        resetTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            collapse(force: true)
+        }
+    }
+
+    private func collapse(force: Bool = false) {
+        guard force || !busy else { return }
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.74)) {
+            phase = .idle
+            proximity = 0
+            pull = 0
+            hovered = nil
+        }
+    }
+}
+
+enum Haptics {
+    static func tap() { NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now) }
+    static func success() { NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now) }
+}

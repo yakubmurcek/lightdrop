@@ -1,0 +1,74 @@
+# lightdrop
+
+AirDrop in the terminal, between your computers and your friends' computers, over Tailscale.
+Files go straight from one computer to the other and land in Downloads. Mac, Linux and Windows.
+
+## Use it
+
+1. **Install Tailscale** and join the network (the invite link you got).
+2. **Install lightdrop**: paste one line into a terminal (Mac: Terminal app; Windows: PowerShell).
+   - Mac / Linux: `curl -fsSL https://gist.githubusercontent.com/yakubmurcek/7cc69d2af1db4b710846e113a69fcae2/raw/install.sh | sh`
+   - Windows: `irm https://gist.githubusercontent.com/yakubmurcek/7cc69d2af1db4b710846e113a69fcae2/raw/install.ps1 | iex`
+
+   From now on your computer receives files in the background, also after a restart.
+3. **Send**:
+   - **Mac:** drag a file or folder up to the notch and drop it there. It goes to the other
+     person (with several of their computers online, drop it on the one you want).
+   - **Anywhere:** open a **new** terminal, type `lightdrop `, drag a file or folder in, press
+     Enter, pick the computer by its number.
+
+```
+lightdrop report.pdf              # pick an online computer, it lands in their Downloads
+lightdrop -t macbook photos/      # -t names the computer and skips the picker
+lightdrop uninstall               # stop receiving
+```
+
+Update: run the install line again. Phones are not supported.
+
+## The Mac app (LightDrop)
+
+`mac/` is a SwiftUI menu-bar app with no Dock icon. While a file is dragged near the notch,
+a black island grows out of it (on a Mac without a notch, out of the top centre); dropping
+there sends through the `lightdrop` command (`-t <ip> --json`), so transfer and discovery
+stay in one place. "The other person" = online computers that are receiving and belong to
+another tailnet user (`lightdrop peers`); one → the island is the target, several → one
+pill each. It starts at login (Login Items) and quits from its menu-bar icon.
+
+Testing alone: `defaults write com.lightdrop.notch includeOwnDevices -bool YES` counts your
+own computers as targets.
+
+## How it works
+
+- Every machine runs a receiver on its **Tailscale IP only**, port 8765. It accepts
+  uploads and nothing else: no listing, no downloads, so nobody can read or guess
+  what is in your Downloads. Only `GET /ping` answers (so senders can find receivers).
+- Files go straight into `~/Downloads`. A taken name becomes `name 2.ext`, `name 3.ext`…,
+  decided by the receiver: nothing is ever overwritten, and the sender learns nothing
+  about what exists there.
+- A folder travels as one tar stream; the receiver keeps regular files and folders only
+  and refuses any path that would leave the target folder.
+- Transfers are direct device to device (inside one house, over the LAN), encrypted by
+  WireGuard. Nothing is stored anywhere in between.
+- Who may send is your tailnet policy's call: for example, let invited guests reach your
+  devices on TCP port 8765 only.
+- Taildrop can't do this: it only sends between one user's own devices.
+
+Receivers: macOS LaunchAgent `com.lightdrop.receiver` (log `~/Library/Logs/lightdrop.log`),
+Linux `systemctl --user` unit `lightdrop.service`, Windows scheduled task `lightdrop receiver`
+(starts at boot, hidden) plus firewall rule `lightdrop` (TCP 8765, 100.64.0.0/10 only).
+On macOS the receiver finds its Tailscale address from the network interfaces, because
+the Tailscale app's CLI doesn't answer outside a terminal.
+
+Install puts the binary in `~/.local/bin` (Windows: `%LOCALAPPDATA%\lightdrop`) and adds that
+folder to the PATH (the login shell's startup file; Windows: the user PATH).
+
+## Build and publish
+
+```
+bash build.sh        # needs Go: vet, test, binaries for every platform into dist/
+bash build-app.sh    # Mac with Xcode: dist/LightDrop-app.zip
+bash publish.sh      # push dist/ and the installers to the gist the install lines download from
+```
+
+`publish.sh` pushes to the owner's gist. In a fork, point `GIST` in `publish.sh` and the
+URLs in `install.sh`, `install.ps1` and this README at your own gist.
