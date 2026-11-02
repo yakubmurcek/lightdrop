@@ -35,10 +35,40 @@ final class NotchModel: ObservableObject {
     /// Bumped on failure to shake the island.
     @Published var shakes = 0
 
+    /// A file (or a whole send of them) arriving here, shown quietly beside the notch.
+    struct Incoming: Equatable {
+        enum State { case arriving, done, failed }
+        var ip: String
+        /// Who sends it: their computer's own name until `lightdrop peers` names the person.
+        var from: String
+        var pic: String?
+        /// The file arriving now, the `index`-th of `count`.
+        var name: String
+        var index: Int
+        var count: Int
+        /// How far the current file is, nil when its size is unknown.
+        var part: Double?
+        var state = State.arriving
+        var saved: [URL] = []
+
+        var progress: Double? { part.map { (Double(index - 1) + $0) / Double(max(count, 1)) } }
+        var title: String { saved.count == 1 ? saved[0].lastPathComponent : "\(saved.count) items" }
+    }
+    @Published var incoming: Incoming?
+    /// Only transfers that take a moment show, so a small file doesn't flash.
+    @Published var incomingShown = false
+    @Published var incomingThumb: NSImage?
+    /// Each saved file and who it came from (the menu lists the last few).
+    var received: (URL, String) -> Void = { _, _ in }
+
     let notchSize: CGSize
     let hasNotch: Bool
     private var lastLoad = Date.distantPast
     private var resetTask: Task<Void, Never>?
+    private var incomingID = 0
+    private var incomingTask: Task<Void, Never>?
+    /// Every online computer, to tell who a file comes from.
+    private var known: [Peer] = []
 
     init(notchSize: CGSize, hasNotch: Bool) {
         self.notchSize = notchSize
@@ -135,6 +165,126 @@ final class NotchModel: ObservableObject {
                 lastPic = first.pic
             }
             for url in Set(found.compactMap(\.pic)) where photos[url] == nil { loadPhoto(url) }
+        }
+    }
+
+    // MARK: receiving
+
+    /// What the receiver reports. Nothing here asks for attention: no sound, no
+    /// jiggle, and the island stays within the menu bar until the file is in.
+    func arrival(_ ev: Lightdrop.Arrival) {
+        switch ev {
+        case let .incoming(id, name, from, ip, total, index, count):
+            incomingID = id
+            if var cur = incoming, cur.ip == ip, incomingShown || cur.state == .arriving {
+                // The next file of the same send.
+                cur.name = name
+                (cur.index, cur.count) = (index, count)
+                cur.part = total > 0 ? 0 : nil
+                cur.state = .arriving
+                withAnimation(.easeInOut(duration: 0.3)) { incoming = cur }
+                if incomingShown { return later(30) { [self] in failIncoming() } }
+            } else {
+                incomingShown = false
+                incomingThumb = nil
+                incoming = Incoming(ip: ip, from: from.isEmpty ? ip : from, name: name, index: index, count: count,
+                                    part: total > 0 ? 0 : nil)
+                identify(ip)
+            }
+            later(0.7) { [self] in
+                if incoming?.state == .arriving { reveal() }
+                later(30) { [self] in failIncoming() }
+            }
+        case let .progress(id, got, total):
+            guard id == incomingID, var cur = incoming, cur.state == .arriving else { return }
+            if total > 0 { cur.part = min(1, Double(got) / Double(total)) }
+            withAnimation(.easeOut(duration: 0.3)) { incoming = cur }
+            if incomingShown { later(30) { [self] in failIncoming() } }
+        case let .done(id, _, path):
+            guard id == incomingID, var cur = incoming else { return }
+            let url = URL(fileURLWithPath: path)
+            cur.part = 1
+            cur.saved.append(url)
+            withAnimation(.easeOut(duration: 0.3)) { incoming = cur }
+            received(url, cur.from)
+            // More of this send may follow (old senders don't say): wait for it first.
+            later(cur.index < cur.count ? 30 : 0.8) { [self] in finishIncoming() }
+        case let .failed(id):
+            guard id == incomingID else { return }
+            failIncoming()
+        }
+    }
+
+    /// Runs `then` after `seconds`, replacing whatever was scheduled for the incoming file.
+    private func later(_ seconds: Double, _ then: @escaping @MainActor () -> Void) {
+        incomingTask?.cancel()
+        incomingTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1e9))
+            guard !Task.isCancelled else { return }
+            then()
+        }
+    }
+
+    private func reveal() {
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) { incomingShown = true }
+    }
+
+    private func finishIncoming() {
+        guard var cur = incoming, let last = cur.saved.last else { return failIncoming() }
+        cur.state = .done
+        loadIncomingThumb(last)
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
+            incoming = cur
+            incomingShown = true
+        }
+        later(2.6) { [self] in clearIncoming() }
+    }
+
+    /// The sender gave up or vanished. Whatever arrived still counts; otherwise a
+    /// short red ring where the progress was, or nothing at all if it never showed.
+    private func failIncoming() {
+        guard var cur = incoming else { return }
+        if !cur.saved.isEmpty { return finishIncoming() }
+        guard incomingShown else { return clearIncoming() }
+        cur.state = .failed
+        withAnimation(.easeOut(duration: 0.3)) { incoming = cur }
+        later(1.6) { [self] in clearIncoming() }
+    }
+
+    private func clearIncoming() {
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) { incomingShown = false }
+        // Kept until the island has closed, so it closes as calmly as it opened.
+        later(0.8) { [self] in incoming = nil }
+    }
+
+    /// Names the sender from the tailnet's list of computers (photo included).
+    private func identify(_ ip: String) {
+        func apply(_ p: Peer) {
+            guard incoming?.ip == ip else { return }
+            withAnimation(.easeOut(duration: 0.25)) {
+                incoming?.from = p.person
+                incoming?.pic = p.pic
+            }
+            if let pic = p.pic, photos[pic] == nil { loadPhoto(pic) }
+        }
+        if let p = known.first(where: { $0.ip == ip }) { return apply(p) }
+        Task {
+            known = (try? await Lightdrop.peers()) ?? known
+            if let p = known.first(where: { $0.ip == ip }) { apply(p) }
+        }
+    }
+
+    private func loadIncomingThumb(_ url: URL) {
+        incomingThumb = NSWorkspace.shared.icon(forFile: url.path)
+        let req = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: 80, height: 80),
+                                               scale: NSScreen.main?.backingScaleFactor ?? 2,
+                                               representationTypes: [.lowQualityThumbnail, .thumbnail])
+        QLThumbnailGenerator.shared.generateRepresentations(for: req) { rep, _, _ in
+            guard let img = rep?.nsImage else { return }
+            Task { @MainActor in
+                guard self.incoming?.saved.last == url else { return }
+                withAnimation(.easeOut(duration: 0.2)) { self.incomingThumb = img }
+            }
         }
     }
 

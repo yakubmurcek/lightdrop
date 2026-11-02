@@ -27,6 +27,13 @@ enum Snapshot {
             ("6-sent", { $0.phase = .sent; $0.progress = 1; $0.title = "Delivered to Sam"; $0.detail = "sunset.jpg" }),
             ("7-offline", { $0.phase = .hover; $0.targets = []; $0.lastPic = "p" }),
             ("8-failed", { $0.phase = .failed; $0.title = "Couldn't send"; $0.detail = "Sam isn't online" }),
+            ("9-receiving", { $0.incomingShown = true
+                $0.incoming = .init(ip: sam.ip, from: "Sam", pic: "p", name: "sunset.jpg", index: 1, count: 1, part: 0.4) }),
+            ("10-received", { $0.incomingShown = true; $0.incomingThumb = file
+                $0.incoming = .init(ip: sam.ip, from: "Sam", pic: "p", name: "sunset.jpg", index: 1, count: 1, part: 1,
+                                    state: .done, saved: [URL(fileURLWithPath: "/Downloads/sunset.jpg")]) }),
+            ("11-receiving-folder", { $0.incomingShown = true
+                $0.incoming = .init(ip: sam.ip, from: "Ondrejs-MacBook-Pro", name: "HousePlan", index: 1, count: 1, part: nil) }),
         ]
         for (name, apply) in states {
             let m = NotchModel(notchSize: CGSize(width: 185, height: 32), hasNotch: true)

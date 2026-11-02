@@ -6,9 +6,15 @@
 //	lightdrop uninstall               stop receiving
 //	lightdrop receive [--dir D]       receive in the foreground
 //	lightdrop peers                   online computers, as JSON (for the Mac app)
+//	lightdrop events                  what is arriving here, live (--json for the Mac app)
 //
 // --json makes sending print one JSON object per line on stdout (progress, then
 // the result) instead of a progress bar; the Mac notch app reads it.
+//
+// The receiver also tells local subscribers what is arriving, byte by byte, over
+// a Unix socket only this user can open (never over Tailscale): that is how the
+// notch app shows an incoming file. While someone listens there, the desktop
+// notification is skipped, so one file doesn't alert twice.
 //
 // Every machine runs a receiver on its Tailscale IP only, port 8765. It accepts
 // uploads and nothing else: it never lists or serves a file, so nobody can read
@@ -21,6 +27,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -40,6 +47,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf16"
 )
@@ -74,6 +82,8 @@ func main() {
 		err = uninstall()
 	case "peers":
 		err = printPeers()
+	case "events":
+		err = watchEvents()
 	case "receive":
 		dir := ""
 		if len(args) >= 3 && args[1] == "--dir" {
@@ -101,6 +111,7 @@ lightdrop -t <device> <path>...   send without the picker
 lightdrop install                 receive in the background (files land in Downloads)
 lightdrop uninstall               stop receiving
 lightdrop peers                   online computers, as JSON
+lightdrop events                  what is arriving here, live
 
 Update: run the install line again.
 `)
@@ -258,8 +269,8 @@ func sendAll(to string, paths []string) error {
 	if err != nil {
 		return err
 	}
-	for _, p := range paths {
-		if err := sendOne(target, p); err != nil {
+	for i, p := range paths {
+		if err := sendOne(target, p, i+1, len(paths)); err != nil {
 			return err
 		}
 	}
@@ -357,7 +368,8 @@ func pickTarget(to string) (peer, error) {
 	return rs[n-1], nil
 }
 
-func sendOne(to peer, path string) error {
+// sendOne sends the i-th of n paths (the receiver shows "2 of 3").
+func sendOne(to peer, path string, i, n int) error {
 	path = filepath.Clean(path)
 	st, err := os.Stat(path)
 	if err != nil {
@@ -394,8 +406,12 @@ func sendOne(to peer, path string) error {
 	}
 	prog := &progress{total: size, label: name}
 	host, _ := os.Hostname()
-	u := fmt.Sprintf("http://%s/send?kind=%s&name=%s&from=%s", addr(to.IP), kind,
-		url.QueryEscape(name), url.QueryEscape(strings.SplitN(host, ".", 2)[0]))
+	u := fmt.Sprintf("http://%s/send?kind=%s&name=%s&from=%s&i=%d&n=%d", addr(to.IP), kind,
+		url.QueryEscape(name), url.QueryEscape(strings.SplitN(host, ".", 2)[0]), i, n)
+	if kind == "dir" {
+		// A folder streams without a length; its estimate lets the receiver show progress.
+		u += "&size=" + strconv.FormatInt(size, 10)
+	}
 	req, err := http.NewRequest(http.MethodPost, u, io.TeeReader(body, prog))
 	if err != nil {
 		return err
@@ -541,6 +557,9 @@ func receive(dir string) error {
 		io.WriteString(w, ping)
 	})
 	mux.HandleFunc("/send", func(w http.ResponseWriter, r *http.Request) { handleSend(w, r, dir) })
+	if err := events.listen(eventSocket()); err != nil {
+		fmt.Println("lightdrop: no live progress for the app:", err)
+	}
 	srv := &http.Server{
 		Addr:              addr(ip),
 		Handler:           mux,
@@ -555,28 +574,195 @@ func handleSend(w http.ResponseWriter, r *http.Request, dir string) {
 		http.NotFound(w, r)
 		return
 	}
-	name := safeName(r.URL.Query().Get("name"))
+	q := r.URL.Query()
+	name := safeName(q.Get("name"))
 	if name == "" {
 		http.Error(w, "bad name", http.StatusBadRequest)
 		return
 	}
-	var saved string
-	var err error
-	switch r.URL.Query().Get("kind") {
-	case "file":
-		saved, err = receiveFile(dir, name, r.Body)
-	case "dir":
-		saved, err = receiveDir(dir, name, r.Body)
-	default:
+	kind := q.Get("kind")
+	if kind != "file" && kind != "dir" {
 		http.Error(w, "bad kind", http.StatusBadRequest)
 		return
 	}
+	// A file's length is known (older senders too); a folder's is the sender's
+	// estimate, 0 when it gave none.
+	total := r.ContentLength
+	if total <= 0 {
+		total, _ = strconv.ParseInt(q.Get("size"), 10, 64)
+	}
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	id := lastID.Add(1)
+	ev := map[string]any{"event": "incoming", "id": id, "name": name, "kind": kind,
+		"from": safeName(q.Get("from")), "ip": ip, "total": total}
+	if i, err := strconv.Atoi(q.Get("i")); err == nil {
+		if n, err := strconv.Atoi(q.Get("n")); err == nil && i >= 1 && i <= n {
+			ev["index"], ev["count"] = i, n
+		}
+	}
+	events.emit(ev)
+	body := &arrival{r: r.Body, id: id, total: total, last: time.Now()}
+	var saved string
+	var err error
+	if kind == "file" {
+		saved, err = receiveFile(dir, name, body)
+	} else {
+		saved, err = receiveDir(dir, name, body)
+	}
 	if err != nil {
+		events.emit(map[string]any{"event": "failed", "id": id, "error": err.Error()})
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	events.emit(map[string]any{"event": "done", "id": id, "saved": saved, "path": filepath.Join(dir, saved)})
 	io.WriteString(w, saved)
-	go notify(saved, sender(r.RemoteAddr, r.URL.Query().Get("from")))
+	go notify(saved, sender(r.RemoteAddr, q.Get("from")), events.watched())
+}
+
+// --- live events (local only) ----------------------------------------------
+
+var (
+	events = &hub{subs: map[net.Conn]bool{}}
+	lastID atomic.Int64
+)
+
+// eventSocket is where the receiver tells local subscribers what is arriving.
+func eventSocket() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	// Not in a "lightdrop" folder: on a Mac that is also the app's "LightDrop" cache.
+	return filepath.Join(dir, "lightdrop-receiver.sock")
+}
+
+// hub hands each event, as a JSON line, to everyone connected to the socket.
+type hub struct {
+	mu   sync.Mutex
+	subs map[net.Conn]bool
+}
+
+// listen opens the socket for this user only (0600).
+func (h *hub) listen(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	os.Remove(path) // left over from a receiver that didn't exit cleanly
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return err
+	}
+	os.Chmod(path, 0o600)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			h.mu.Lock()
+			h.subs[c] = true
+			h.mu.Unlock()
+			// Subscribers only read; EOF means one left.
+			go func() {
+				io.Copy(io.Discard, c)
+				h.mu.Lock()
+				delete(h.subs, c)
+				h.mu.Unlock()
+				c.Close()
+			}()
+		}
+	}()
+	return nil
+}
+
+func (h *hub) watched() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs) > 0
+}
+
+func (h *hub) emit(v map[string]any) {
+	b, _ := json.Marshal(v)
+	b = append(b, '\n')
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.subs {
+		// A stuck subscriber can hold an upload back by a second at most.
+		c.SetWriteDeadline(time.Now().Add(time.Second))
+		if _, err := c.Write(b); err != nil {
+			delete(h.subs, c)
+			c.Close()
+		}
+	}
+}
+
+// arrival counts an upload's bytes and reports them, at most every 150 ms.
+type arrival struct {
+	r          io.Reader
+	id         int64
+	got, total int64
+	last       time.Time
+}
+
+func (a *arrival) Read(b []byte) (int, error) {
+	n, err := a.r.Read(b)
+	a.got += int64(n)
+	if time.Since(a.last) > 150*time.Millisecond {
+		a.last = time.Now()
+		events.emit(map[string]any{"event": "progress", "id": a.id, "got": a.got, "total": a.total})
+	}
+	return n, err
+}
+
+// watchEvents prints what this computer's receiver is receiving, as it happens:
+// the receiver's JSON lines with --json (the Mac app reads them), else one line
+// per file. It reconnects when the receiver restarts. With --json it ends when
+// stdin closes, so it never outlives the app that started it.
+func watchEvents() error {
+	if jsonOut {
+		go func() {
+			io.Copy(io.Discard, os.Stdin)
+			os.Exit(0)
+		}()
+	}
+	waiting := false
+	for {
+		c, err := net.Dial("unix", eventSocket())
+		if err != nil {
+			if !jsonOut && !waiting {
+				fmt.Fprintln(os.Stderr, "lightdrop: waiting for the receiver (lightdrop install)…")
+				waiting = true
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		waiting = false
+		sc := bufio.NewScanner(c)
+		for sc.Scan() {
+			if jsonOut {
+				if _, err := os.Stdout.Write(append(sc.Bytes(), '\n')); err != nil {
+					return err
+				}
+				continue
+			}
+			var ev struct {
+				Event, Name, From, IP, Saved, Error string
+				Total                               int64
+			}
+			if json.Unmarshal(sc.Bytes(), &ev) != nil {
+				continue
+			}
+			switch ev.Event {
+			case "incoming":
+				fmt.Printf("← %s from %s (%s)\n", ev.Name, ev.From, human(ev.Total))
+			case "done":
+				fmt.Printf("  saved %s in Downloads\n", ev.Saved)
+			case "failed":
+				fmt.Printf("  failed: %s\n", ev.Error)
+			}
+		}
+		c.Close()
+	}
 }
 
 // safeName keeps one path component, with characters no OS accepts replaced.
@@ -729,9 +915,14 @@ func sender(remote, claimed string) string {
 	return w.Node.ComputedName
 }
 
-func notify(saved, from string) {
+// notify logs a received file and shows a desktop notification, unless quiet
+// (the notch app is already showing it).
+func notify(saved, from string, quiet bool) {
 	msg := fmt.Sprintf("%s from %s", saved, from)
 	fmt.Println("received", msg)
+	if quiet {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	switch runtime.GOOS {

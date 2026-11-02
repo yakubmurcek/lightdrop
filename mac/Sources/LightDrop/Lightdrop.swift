@@ -29,10 +29,14 @@ enum Lightdrop {
     /// Online computers that are receiving and belong to someone else. With the
     /// `includeOwnDevices` default on (testing alone), your own count too.
     static func targets() async throws -> [Peer] {
-        let out = try await run(["peers"]).stdout
-        let peers = try JSONDecoder().decode([Peer].self, from: Data(out.utf8))
         let own = UserDefaults.standard.bool(forKey: "includeOwnDevices")
-        return peers.filter { $0.receiving && !$0.owner.isEmpty && ($0.owner != "you" || own) }
+        return try await peers().filter { $0.receiving && !$0.owner.isEmpty && ($0.owner != "you" || own) }
+    }
+
+    /// Every online computer, yours included (to name who a file comes from).
+    static func peers() async throws -> [Peer] {
+        let out = try await run(["peers"]).stdout
+        return try JSONDecoder().decode([Peer].self, from: Data(out.utf8))
     }
 
     enum Event {
@@ -56,6 +60,65 @@ enum Lightdrop {
             if let ev { Task { @MainActor in onEvent(ev) } }
         }
         if result.status != 0 { throw LightdropError(message: result.stderr) }
+    }
+
+    /// What this computer's receiver reports while a file comes in (`lightdrop events --json`).
+    enum Arrival {
+        /// The `index`-th of `count` files from one send; `total` is 0 when unknown.
+        case incoming(id: Int, name: String, from: String, ip: String, total: Int64, index: Int, count: Int)
+        case progress(id: Int, got: Int64, total: Int64)
+        case done(id: Int, saved: String, path: String)
+        case failed(id: Int)
+
+        init?(json line: String) {
+            guard let data = line.data(using: .utf8),
+                  let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let event = o["event"] as? String, let id = (o["id"] as? NSNumber)?.intValue else { return nil }
+            func int64(_ k: String) -> Int64 { (o[k] as? NSNumber)?.int64Value ?? 0 }
+            func str(_ k: String) -> String { o[k] as? String ?? "" }
+            switch event {
+            case "incoming":
+                self = .incoming(id: id, name: str("name"), from: str("from"), ip: str("ip"), total: int64("total"),
+                                 index: (o["index"] as? NSNumber)?.intValue ?? 1, count: (o["count"] as? NSNumber)?.intValue ?? 1)
+            case "progress": self = .progress(id: id, got: int64("got"), total: int64("total"))
+            case "done": self = .done(id: id, saved: str("saved"), path: str("path"))
+            case "failed": self = .failed(id: id)
+            default: return nil
+            }
+        }
+    }
+
+    /// Follows the receiver for as long as the app runs: one `lightdrop events`
+    /// process, started again a few seconds after it ends (the CLI was updated,
+    /// or wasn't installed yet). Closing its stdin, which dies with the app, ends it.
+    final class ArrivalWatcher: @unchecked Sendable {
+        private var process: Process?
+        private var stdin: Pipe?
+
+        func start(onEvent: @escaping @MainActor (Arrival) -> Void) {
+            guard isInstalled else { return retry(onEvent) }
+            let p = Process(), out = Pipe(), input = Pipe()
+            p.executableURL = binary
+            p.arguments = ["events", "--json"]
+            p.standardOutput = out
+            p.standardInput = input
+            p.standardError = FileHandle.nullDevice
+            let buf = LineBuffer(keepAll: false) { line in
+                if let ev = Arrival(json: line) { Task { @MainActor in onEvent(ev) } }
+            }
+            out.fileHandleForReading.readabilityHandler = { h in buf.append(h.availableData) }
+            p.terminationHandler = { [weak self] _ in
+                out.fileHandleForReading.readabilityHandler = nil
+                self?.retry(onEvent)
+            }
+            do { try p.run() } catch { return retry(onEvent) }
+            process = p
+            stdin = input
+        }
+
+        private func retry(_ onEvent: @escaping @MainActor (Arrival) -> Void) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.start(onEvent: onEvent) }
+        }
     }
 
     struct LightdropError: LocalizedError {
@@ -100,12 +163,17 @@ private final class LineBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var all = Data(), pending = Data()
     private let onLine: ((String) -> Void)?
+    /// False for a process that runs for hours: only the lines matter.
+    private let keepAll: Bool
 
-    init(onLine: ((String) -> Void)?) { self.onLine = onLine }
+    init(keepAll: Bool = true, onLine: ((String) -> Void)?) {
+        self.keepAll = keepAll
+        self.onLine = onLine
+    }
 
     func append(_ chunk: Data) {
         lock.lock(); defer { lock.unlock() }
-        all.append(chunk)
+        if keepAll { all.append(chunk) }
         pending.append(chunk)
         while let nl = pending.firstIndex(of: 0x0A) {
             onLine?(String(decoding: pending[pending.startIndex..<nl], as: UTF8.self))

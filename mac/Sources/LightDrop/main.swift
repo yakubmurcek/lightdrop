@@ -22,11 +22,14 @@ final class NotchPanel: NSPanel {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var panel: NotchPanel?
     private var model: NotchModel?
     private let watcher = DragWatcher()
+    private let arrivals = Lightdrop.ArrivalWatcher()
     private var statusItem: NSStatusItem?
+    /// The last files that came in, newest first, for the menu.
+    private var recent: [(url: URL, from: String)] = []
     private static let panelSize = CGSize(width: 640, height: 240)
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -45,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.model?.dragEnded()
         }
         watcher.start()
+        arrivals.start { [weak self] ev in self?.model?.arrival(ev) }
         addStatusItem()
         if SMAppService.mainApp.status != .enabled { try? SMAppService.mainApp.register() }
         let args = CommandLine.arguments
@@ -69,6 +73,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let s = Self.panelSize
         let frame = NSRect(x: screen.frame.midX - s.width / 2, y: screen.frame.maxY - s.height, width: s.width, height: s.height)
         let model = NotchModel(notchSize: notch, hasNotch: hasNotch)
+        model.received = { [weak self] url, from in
+            self?.recent.removeAll { $0.url == url }
+            self?.recent.insert((url, from), at: 0)
+            self?.recent = Array(self?.recent.prefix(5) ?? [])
+        }
         self.model = model
         let view = IslandView(model: model) { [weak self] in self?.watcher.draggedURLs ?? [] }
         if let panel {
@@ -96,12 +105,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "arrow.up.circle", accessibilityDescription: "LightDrop")
         let menu = NSMenu()
-        menu.addItem(withTitle: "Drag a file to the notch to send it", action: nil, keyEquivalent: "").isEnabled = false
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Open Downloads", action: #selector(openDownloads), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Quit LightDrop", action: #selector(quit), keyEquivalent: "q").target = self
+        menu.delegate = self
         item.menu = menu
         statusItem = item
+    }
+
+    /// Built on open, so the files received lately are listed (click: show in Finder).
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        menu.addItem(withTitle: "Drag a file to the notch to send it", action: nil, keyEquivalent: "").isEnabled = false
+        menu.addItem(.separator())
+        let live = recent.filter { FileManager.default.fileExists(atPath: $0.url.path) }
+        if !live.isEmpty {
+            menu.addItem(withTitle: "Received", action: nil, keyEquivalent: "").isEnabled = false
+            for r in live {
+                let item = menu.addItem(withTitle: "\(r.url.lastPathComponent) — \(r.from)",
+                                        action: #selector(reveal(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = r.url
+                item.image = NSWorkspace.shared.icon(forFile: r.url.path)
+                item.image?.size = NSSize(width: 16, height: 16)
+            }
+            menu.addItem(.separator())
+        }
+        menu.addItem(withTitle: "Open Downloads", action: #selector(openDownloads), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Quit LightDrop", action: #selector(quit), keyEquivalent: "q").target = self
+    }
+
+    @objc private func reveal(_ sender: NSMenuItem) {
+        if let url = sender.representedObject as? URL { NSWorkspace.shared.activateFileViewerSelecting([url]) }
     }
 
     @objc private func openDownloads() {
