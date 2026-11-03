@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
-# Publish a fresh build as a GitHub release: the install lines download from the
-# latest one. Run after build.sh (and build-app.sh on a Mac): bash publish.sh
+# Publish: GitHub runs CI on main, builds every binary and the Mac app, and makes
+# a release under a date tag. The install lines download from the latest release.
 set -euo pipefail
-cd "$(dirname "$0")"
 REPO=yakubmurcek/lightdrop
-git push -q origin HEAD   # the release's tag points at this commit
-tag=v$(date +%Y.%m.%d) n=1
-while gh release view "$tag" -R "$REPO" >/dev/null 2>&1; do n=$((n + 1)); tag=v$(date +%Y.%m.%d).$n; done
-files=(dist/lightdrop-* install.sh install.ps1)
-# The Mac app is built on a Mac (build-app.sh); without it Macs keep the app they have.
-if [ -f dist/LightDrop-app.zip ]; then files+=(dist/LightDrop-app.zip); else echo "no dist/LightDrop-app.zip: the Mac app is not updated"; fi
-gh release create "$tag" -R "$REPO" --target "$(git rev-parse HEAD)" --title "lightdrop $tag" \
-  --notes "Install or update: run the install line from the README." "${files[@]}"
+gh workflow run release.yml -R "$REPO" --ref main
+sleep 5
+run=$(gh run list -R "$REPO" --workflow release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch "$run" -R "$REPO" --exit-status
+gh release view -R "$REPO" --json tagName,url --jq '"published \(.tagName): \(.url)"'

@@ -1,0 +1,40 @@
+# Publishes a release from main: CI first, then every binary and the Mac app are
+# built here (not on a laptop) and released under a date tag. The install lines
+# download from the latest release. Start it with: bash publish.sh
+name: Release
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: ci
+    runs-on: macos-latest # the Mac app needs Xcode; Go cross-compiles from here
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: bash build.sh
+      - run: bash build-app.sh
+      - name: release
+        run: |
+          tag=v$(date -u +%Y.%m.%d) n=1
+          while gh release view "$tag" >/dev/null 2>&1; do n=$((n + 1)); tag=v$(date -u +%Y.%m.%d).$n; done
+          gh release create "$tag" --target "$GITHUB_SHA" --title "lightdrop $tag" \
+            --notes "Install or update: run the install line from the README." \
+            dist/lightdrop-* dist/LightDrop-app.zip install.sh install.ps1

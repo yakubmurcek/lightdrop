@@ -7,5 +7,6 @@ let package = Package(
     platforms: [.macOS(.v13)],
     targets: [
         .executableTarget(name: "LightDrop", path: "Sources/LightDrop"),
+        .testTarget(name: "LightDropTests", dependencies: ["LightDrop"], path: "Tests/LightDropTests"),
     ]
 )
