@@ -54,7 +54,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--demo"), i + 1 < args.count, let model {
             panel?.ignoresMouseEvents = true
-            Task { await model.playDemo(file: URL(fileURLWithPath: args[i + 1])) }
+            let scene = i + 2 < args.count ? args[i + 2] : nil
+            Task { await model.playDemo(file: URL(fileURLWithPath: args[i + 1]), scene: scene) }
         }
     }
 

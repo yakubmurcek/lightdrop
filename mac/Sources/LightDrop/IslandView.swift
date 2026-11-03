@@ -5,6 +5,9 @@ import UniformTypeIdentifiers
 /// "shoulders" where it meets the menu bar, and a soft, rounded body (the lower
 /// half of a superellipse: notch-like when closed, nearly a drop when open). The
 /// bottom edge ripples with `wobble` and sags toward the cursor with `bulge`.
+///
+/// Not animatable on purpose: `Motion` moves it, frame by frame, so the body, the
+/// rim and the mask over the content always draw the very same outline.
 struct NotchShape: Shape {
     var shoulder: CGFloat
     /// Superellipse exponent: ~6 is the boxy notch, ~2.6 a soft drop.
@@ -16,21 +19,34 @@ struct NotchShape: Shape {
     var wobble: CGFloat = 0
     var time: Double = 0
 
-    var animatableData: AnimatablePair<AnimatablePair<CGFloat, CGFloat>, AnimatablePair<CGFloat, CGFloat>> {
-        get { AnimatablePair(AnimatablePair(shoulder, roundness), AnimatablePair(bulge, pull)) }
-        set { (shoulder, roundness, bulge, pull) = (newValue.first.first, newValue.first.second, newValue.second.first, newValue.second.second) }
-    }
+    static let steps = 120
 
     func path(in r: CGRect) -> Path {
+        let pts = points(in: r)
         let s = min(shoulder, r.width / 4, r.height / 3)
-        let left = r.minX + s, right = r.maxX - s
-        let a = (right - left) / 2, cx = r.midX, h = r.height
-        let n = max(2.05, roundness), e = 2 / n
+        var p = Path()
+        p.move(to: CGPoint(x: r.minX, y: r.minY))
+        p.addQuadCurve(to: pts[0], control: CGPoint(x: r.minX + s, y: r.minY))
+        for pt in pts.dropFirst() { p.addLine(to: pt) }
+        p.addQuadCurve(to: CGPoint(x: r.maxX, y: r.minY), control: CGPoint(x: r.maxX - s, y: r.minY))
+        p.closeSubpath()
+        return p
+    }
+
+    /// The body's edge from the left shoulder round to the right one. The superellipse
+    /// is walked by angle (its polar form), which spreads the points evenly: walking
+    /// it by the usual parameter leaves the flat bottom a few long straight segments,
+    /// which show as a kink once the edge ripples.
+    func points(in r: CGRect) -> [CGPoint] {
+        let s = min(shoulder, r.width / 4, r.height / 3)
+        let a = (r.width - 2 * s) / 2, cx = r.midX, h = max(r.height, 1)
+        let n = Double(max(2.05, roundness))
         let px = cx + max(-1, min(1, pull)) * a * 0.55
-        func point(_ phi: Double) -> CGPoint {
-            let c = cos(phi), sn = sin(phi)
-            let ux = -copysign(pow(abs(c), e), c)          // -1 … 1 across
-            let depth = pow(abs(sn), e)                     // 0 at the top, 1 at the bottom
+        func radius(_ th: Double) -> Double { pow(pow(abs(cos(th)), n) + pow(abs(sin(th)), n), -1 / n) }
+        func point(_ th: Double) -> CGPoint {
+            let rr = radius(th)
+            let ux = -rr * cos(th)          // -1 … 1 across
+            let depth = rr * sin(th)        // 0 at the top, 1 at the bottom
             var x = cx + a * ux
             var y = h * depth
             let u = (ux + 1) / 2
@@ -40,18 +56,13 @@ struct NotchShape: Shape {
             y += bulge * depth * exp(-pow((x - px) / (a * 0.38), 2))
             return CGPoint(x: x, y: r.minY + y)
         }
-        let phi0 = asin(min(1, pow(Double(s / max(h, s + 1)), Double(n) / 2)))
-        var p = Path()
-        p.move(to: CGPoint(x: r.minX, y: r.minY))
-        p.addQuadCurve(to: point(phi0), control: CGPoint(x: left, y: r.minY))
-        let steps = 96
-        for i in 1..<steps {
-            p.addLine(to: point(phi0 + (.pi - 2 * phi0) * Double(i) / Double(steps)))
+        // Where the shoulder hands over to the body: at depth s / h.
+        var lo = 0.0, hi = Double.pi / 2
+        for _ in 0..<24 {
+            let mid = (lo + hi) / 2
+            if radius(mid) * sin(mid) < Double(s / h) { lo = mid } else { hi = mid }
         }
-        p.addLine(to: point(.pi - phi0))
-        p.addQuadCurve(to: CGPoint(x: r.maxX, y: r.minY), control: CGPoint(x: right, y: r.minY))
-        p.closeSubpath()
-        return p
+        return (0...Self.steps).map { point(lo + (.pi - 2 * lo) * Double($0) / Double(Self.steps)) }
     }
 }
 
@@ -115,10 +126,11 @@ struct IslandView: View {
     @ObservedObject var model: NotchModel
     let urls: () -> [URL]
     @State private var targeted = false
-    /// The drawn size: width and height chase `size` on different springs, so
-    /// the island squashes and stretches like jelly.
-    @State private var w: CGFloat = 0
-    @State private var h: CGFloat = 0
+    /// The drawn outline, per frame: width and height chase `size` on different
+    /// springs, so the island squashes and stretches like jelly.
+    @State private var motion = Motion()
+    /// Bumped to look again at whether everything has come to rest.
+    @State private var wake = 0
 
     private var notch: CGSize { model.notchSize }
 
@@ -131,9 +143,11 @@ struct IslandView: View {
     private var compact: Bool { arrival.map { $0.state != .done } ?? false }
     static let ear: CGFloat = 33
 
+    /// The resting island, just around the notch; it never draws smaller.
+    private var idle: CGSize { CGSize(width: notch.width + 12, height: max(notch.height, 1)) }
+
     /// Island size per phase; "near" grows with proximity.
     private var size: CGSize {
-        let idle = CGSize(width: notch.width + 12, height: max(notch.height, 1))
         switch model.phase {
         case .idle:
             guard let arrival else { return idle }
@@ -179,7 +193,7 @@ struct IslandView: View {
     }
 
     /// Resting ripple per phase; a kick (any change) adds a jiggle that dies away.
-    private func wobble(_ now: Date) -> CGFloat {
+    private func wobble(_ t: Double) -> CGFloat {
         let base: CGFloat = switch model.phase {
         case .idle: 0
         case .near: 0.9 * model.proximity
@@ -187,63 +201,150 @@ struct IslandView: View {
         case .sending: 1.0
         case .sent, .failed: 0.5
         }
-        return base + kick(now) * 5
+        return base + kick(t) * 4
     }
 
     /// 1 right after a kick, fading to 0 over about a second.
-    private func kick(_ now: Date) -> CGFloat {
-        CGFloat(model.kickStrength * exp(-now.timeIntervalSince(model.kickedAt) * 3.4))
+    private func kick(_ t: Double) -> CGFloat {
+        CGFloat(model.kickStrength * exp(-max(0, t - model.kickedAt.timeIntervalSinceReferenceDate) * 3.4))
     }
 
-    private var resting: Bool {
-        model.phase == .idle && Date().timeIntervalSince(model.kickedAt) > 1.5
+    private var look: Look {
+        Look(size: size, shoulder: 6 + 9 * expanded, roundness: roundness, bulge: bulge, shade: expanded,
+             outline: outlinePaint, trace: tracePaint)
+    }
+
+    /// The edge as a whole: a slowly turning rainbow while a file hovers, a green or
+    /// red glow after, a faint line while a file comes near.
+    private var outlinePaint: RimPaint {
+        switch model.phase {
+        case .near: .solid(.white, 0.14 * model.proximity)
+        case .hover: RimPaint(colors: RimPaint.rainbow, opacity: 0.95)
+        case .sent: .solid(Palette.green, 0.85)
+        case .failed: .solid(Palette.red, 0.8)
+        case .sending: .off
+        case .idle: arrival?.state == .done ? .solid(Palette.green, 0.6) : .off
+        }
+    }
+
+    /// The edge traced as far as the progress: while sending, and faintly while a file comes in.
+    private var tracePaint: RimPaint {
+        switch model.phase {
+        case .sending: RimPaint(colors: RimPaint.flow, opacity: 0.9)
+        case .idle where arrival?.state == .arriving: RimPaint(colors: RimPaint.flow, opacity: 0.5)
+        default: .off
+        }
+    }
+
+    private var traced: Double {
+        switch model.phase {
+        case .sending: model.progress
+        case .idle: arrival.map { $0.state == .arriving ? $0.progress ?? 0 : 1 } ?? 1
+        default: 1
+        }
+    }
+
+    /// How the island moves to its next look.
+    private var pace: Motion.Pace {
+        if model.phase == .near { return .track }
+        // Receiving opens and closes calmly: no jelly while someone's working.
+        if model.phase == .idle && model.incoming != nil { return .calm }
+        return .open
+    }
+
+    /// Still: nothing moving, nothing about to (the timeline stops drawing).
+    private func resting(_ look: Look) -> Bool {
+        _ = wake
+        if Snapshot.active { return true }
+        let now = Date().timeIntervalSinceReferenceDate
+        return model.phase == .idle && motion.look == look && now >= motion.settles
+            && now - model.kickedAt.timeIntervalSinceReferenceDate > 1.5
     }
 
     var body: some View {
+        let look = self.look
         VStack(spacing: 0) {
-            TimelineView(.animation(paused: resting || Snapshot.active)) { tl in
+            TimelineView(.animation(paused: resting(look))) { tl in
                 let now = Snapshot.active ? model.kickedAt.addingTimeInterval(5) : tl.date
-                let t = now.timeIntervalSinceReferenceDate
-                let k = kick(now)
-                let shape = NotchShape(shoulder: 6 + 9 * expanded, roundness: roundness, bulge: bulge, pull: model.pull,
-                                       wobble: wobble(now), time: t)
-                ZStack(alignment: .top) {
-                    shape.fill(Color.black)
-                        .shadow(color: .black.opacity(0.5 * expanded), radius: 26 * expanded, y: 10 * expanded)
-                    Rim(shape: shape, model: model, angle: .degrees(t * 70))
-                    content
-                        .padding(.top, compact ? 0 : notch.height + 6)
-                        // Round sides: keep content away from where the outline curves in.
-                        .padding(.horizontal, sideInset)
-                        .frame(width: w, height: h, alignment: .top)
-                        // Contents bob with the jiggle, a beat behind the outline.
-                        .scaleEffect(1 + 0.03 * k * sin(t * 17), anchor: .top)
-                        .offset(y: 2 * k * sin(t * 13 + 1))
-                }
-                .frame(width: w, height: h)
+                island(look, at: now.timeIntervalSinceReferenceDate)
             }
-            .scaleEffect(targeted && model.phase == .hover ? 1.03 : 1, anchor: .top)
             .modifier(Shake(travel: CGFloat(model.shakes)))
             .opacity(model.hasNotch || model.phase != .idle || model.incomingShown ? 1 : 0)
-            .contentShape(Rectangle())
-            .onDrop(of: [UTType.fileURL],
-                    delegate: IslandDrop(model: model, width: w, urls: urls, targeted: $targeted))
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onAppear { w = size.width; h = size.height }
-        .onChange(of: size) { new in
-            if model.phase == .idle && model.incoming != nil {
-                // Receiving opens and closes calmly: no jelly while someone's working.
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.86)) { w = new.width; h = new.height }
-            } else if model.phase == .near || model.phase == .idle && new.height < 40 {
-                withAnimation(.interactiveSpring(response: 0.36, dampingFraction: 0.5)) { w = new.width }
-                withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.42)) { h = new.height }
-            } else {
-                withAnimation(.spring(response: 0.56, dampingFraction: 0.5)) { w = new.width }
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.4)) { h = new.height }
-            }
+        .onChange(of: look) { new in
+            motion.retarget(to: new, pace: pace)
+            wake += 1
         }
+        .onChange(of: model.pull) { new in
+            motion.follow(pull: new)
+            wake += 1
+        }
+        .onChange(of: traced) { new in
+            motion.follow(progress: new)
+            wake += 1
+        }
+        // Once it has all come to rest, look again so the timeline can stop.
+        .task(id: wake) {
+            let now = Date().timeIntervalSinceReferenceDate
+            let quiet = max(motion.settles, model.kickedAt.timeIntervalSinceReferenceDate + 1.5)
+            guard quiet > now else { return }
+            try? await Task.sleep(nanoseconds: UInt64((quiet - now + 0.05) * 1e9))
+            if !Task.isCancelled { wake += 1 }
+        }
+    }
+
+    /// One frame: the outline where the springs are at `t`, the content laid out at
+    /// its final size and seen through that outline (so nothing shows outside it).
+    private func island(_ look: Look, at t: Double) -> some View {
+        if motion.look == nil {
+            motion.jump(to: look)
+            motion.progress.jump(traced)
+        }
+        motion.lastFrame = max(motion.lastFrame, t)
+        let k = kick(t)
+        let w = max(idle.width, motion.w.value(at: t)), h = max(idle.height, motion.h.value(at: t))
+        let shape = NotchShape(shoulder: motion.shoulder.value(at: t), roundness: motion.roundness.value(at: t),
+                               bulge: motion.bulge.value(at: t), pull: motion.pull.value(at: t),
+                               wobble: wobble(t), time: t)
+        return ZStack(alignment: .top) {
+            Backdrop(shape: shape, shade: motion.shade.value(at: t), outline: motion.outline.paint(at: t),
+                     trace: motion.trace.paint(at: t), traced: motion.progress.value(at: t),
+                     angle: .degrees(t * 70))
+                .frame(width: w, height: h)
+            content
+                .padding(.top, compact ? 0 : notch.height + 6)
+                // Round sides: keep content away from where the outline curves in.
+                .padding(.horizontal, sideInset)
+                .frame(width: look.size.width, height: look.size.height, alignment: .top)
+                // The content animates only on its own changes (below the reset further down).
+                .animation(.spring(response: 0.42, dampingFraction: 0.82), value: scene)
+                // Contents bob with the jiggle, a beat behind the outline.
+                .offset(y: 1.5 * k * sin(t * 13 + 1))
+                .mask(alignment: .top) { shape.frame(width: w, height: h) }
+                // The mask is this frame's outline. Changed inside an animation, SwiftUI would
+                // cross-fade it from the last one, and the old outline would show content
+                // outside the island for as long as that lasts.
+                .transaction { $0.animation = nil }
+                .contentShape(Rectangle())
+                .modifier(DropArea(active: !Snapshot.active,
+                                   delegate: IslandDrop(model: model, width: look.size.width, urls: urls, targeted: $targeted)))
+        }
+    }
+
+    /// What the content shows, coarsely: when this changes, the content animates.
+    private struct Scene: Equatable {
+        var phase: NotchModel.Phase
+        var arrival: NotchModel.Incoming.State?
+        var pills: Bool
+        var nobody: Bool
+        var looking: Bool
+    }
+
+    private var scene: Scene {
+        Scene(phase: model.phase, arrival: arrival?.state, pills: model.targets.count > 1,
+              nobody: model.targets.isEmpty, looking: model.loadingTargets)
     }
 
     private var sideInset: CGFloat {
@@ -273,10 +374,12 @@ struct IslandView: View {
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.92))
             }
-            .padding(.top, 5)
+            // Centred in the part below the notch (its sag included), however far it has grown.
+            .frame(height: max(0, size.height + bulge - notch.height - 12))
             .opacity(Double(max(0, model.proximity - 0.35) / 0.65))
             .scaleEffect(0.8 + 0.2 * model.proximity)
             .blur(radius: 4 * (1 - model.proximity))
+            .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.86), value: model.proximity)
         case .hover:
             Group {
                 if model.targets.count > 1 { pillsContent } else { handoffContent }
@@ -347,6 +450,7 @@ struct IslandView: View {
                             .stroke(ringColor, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                             .rotationEffect(.degrees(-90))
                             .padding(-5)
+                            .animation(.spring(response: 0.4, dampingFraction: 1), value: model.progress)
                     )
                 if model.phase != .sending {
                     Image(systemName: model.phase == .sent ? "checkmark" : "exclamationmark")
@@ -360,6 +464,8 @@ struct IslandView: View {
                 }
             }
             .frame(width: 54, height: 54)
+            // The badge pops in with a little bounce.
+            .animation(.spring(response: 0.4, dampingFraction: 0.55), value: model.phase)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.phase == .sending ? "Sending to \(model.detail)" : model.title)
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
@@ -385,12 +491,16 @@ struct IslandView: View {
         .padding(.top, 4)
     }
 
-    /// Who sends it on the left of the notch, the progress on the right.
+    /// Who sends it on the left of the notch, the progress on the right, each in the
+    /// middle of the island's visible "ear" beside the notch.
     private func arrivingContent(_ a: NotchModel.Incoming) -> some View {
-        HStack(spacing: 0) {
+        let ear = (size.width - notch.width) / 2 - sideInset
+        return HStack(spacing: 0) {
             Avatar(name: a.from, photo: a.pic.flatMap { model.photos[$0] }, size: 20)
+                .frame(width: ear)
             Spacer(minLength: 0)
             ArrivalRing(progress: a.progress, failed: a.state == .failed)
+                .frame(width: ear)
         }
         .frame(height: max(notch.height, 24))
     }
@@ -440,57 +550,60 @@ struct IslandView: View {
     }
 }
 
-/// The glowing outline: a slowly turning rainbow while a file hovers, the
-/// progress traced around the edge while sending, a green or red flash after.
-struct Rim: View {
+/// The island's black body, its shadow and its glowing edge, drawn from one frame's
+/// outline. Two edge layers are always there and only change paint, so one look
+/// cross-fades into the next instead of a stale outline fading out on its own.
+struct Backdrop: View {
     let shape: NotchShape
-    @ObservedObject var model: NotchModel
+    let shade: CGFloat
+    let outline: RimPaint
+    let trace: RimPaint
+    /// How far round `trace` goes, 0 … 1.
+    let traced: Double
     let angle: Angle
 
     var body: some View {
+        GeometryReader { geo in
             ZStack {
-                switch model.phase {
-                case .hover:
-                    glow(AngularGradient(colors: Palette.glow, center: .center, angle: angle), opacity: 0.95)
-                case .sending:
-                    glow(AngularGradient(colors: [Palette.blue, Palette.violet, Palette.blue], center: .center, angle: angle),
-                         opacity: 0.9, trim: model.progress)
-                case .sent:
-                    glow(LinearGradient(colors: [Palette.green, Palette.green.opacity(0.6)], startPoint: .top, endPoint: .bottom), opacity: 0.85)
-                case .failed:
-                    glow(LinearGradient(colors: [Palette.red, Palette.red.opacity(0.6)], startPoint: .top, endPoint: .bottom), opacity: 0.8)
-                case .near:
-                    shape.stroke(Color.white.opacity(0.08 * model.proximity), lineWidth: 1)
-                case .idle:
-                    if model.incomingShown, let a = model.incoming {
-                        switch a.state {
-                        // The edge fills as the file comes in, faintly.
-                        case .arriving:
-                            glow(LinearGradient(colors: [Palette.blue, Palette.violet], startPoint: .leading, endPoint: .trailing),
-                                 opacity: 0.5, trim: a.progress ?? 0)
-                        case .done:
-                            glow(LinearGradient(colors: [Palette.green, Palette.green.opacity(0.6)], startPoint: .top, endPoint: .bottom),
-                                 opacity: 0.6)
-                        case .failed:
-                            EmptyView()
-                        }
+                shape.fill(Color.black)
+                    .shadow(color: .black.opacity(0.5 * shade), radius: 26 * shade, y: 10 * shade)
+                ZStack {
+                    if outline.opacity > 0.004 { glow(shape, outline) }
+                    if trace.opacity > 0.004 && traced > 0.002 { glow(shape.trim(from: 0, to: traced), trace) }
+                }
+                // Only the sides and bottom glow; the top merges with the menu bar. The mask
+                // reaches past the frame, so the blur and the sag below it aren't cut off.
+                .mask(alignment: .top) {
+                    VStack(spacing: 0) {
+                        LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                            .frame(height: geo.size.height * 0.28)
+                        Color.black.frame(height: geo.size.height * 0.72 + 40)
                     }
+                    .padding(.horizontal, -40)
                 }
             }
-            .allowsHitTesting(false)
+        }
+        // Every value here is already this frame's; SwiftUI mustn't tween them again.
+        .transaction { $0.animation = nil }
+        .allowsHitTesting(false)
     }
 
-    @ViewBuilder
-    private func glow<S: ShapeStyle>(_ style: S, opacity: Double, trim: Double = 1) -> some View {
-        let edge = shape.trim(from: 0, to: trim)
-        ZStack {
-            edge.stroke(style, style: StrokeStyle(lineWidth: 7, lineCap: .round)).blur(radius: 9).opacity(opacity * 0.55)
-            edge.stroke(style, style: StrokeStyle(lineWidth: 1.5, lineCap: .round)).opacity(opacity)
+    private func glow<S: Shape>(_ edge: S, _ paint: RimPaint) -> some View {
+        let style = AngularGradient(colors: paint.colors.map(\.color), center: .center, angle: angle)
+        return ZStack {
+            edge.stroke(style, style: StrokeStyle(lineWidth: 7, lineCap: .round)).blur(radius: 9).opacity(paint.opacity * 0.55)
+            edge.stroke(style, style: StrokeStyle(lineWidth: 1.5, lineCap: .round)).opacity(paint.opacity)
         }
-        // Only the sides and bottom glow; the top merges with the menu bar.
-        .mask(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.28)],
-                             startPoint: .top, endPoint: .bottom))
-        .transition(.opacity)
+    }
+}
+
+/// The drop target, left out while rendering snapshots (ImageRenderer can't draw it).
+struct DropArea: ViewModifier {
+    let active: Bool
+    let delegate: IslandDrop
+
+    func body(content: Content) -> some View {
+        if active { content.onDrop(of: [UTType.fileURL], delegate: delegate) } else { content }
     }
 }
 
@@ -548,6 +661,7 @@ struct ArrivalRing: View {
             Circle()
                 .trim(from: 0, to: failed ? 1 : progress.map { max(0.03, $0) } ?? 0.25)
                 .stroke(failed ? Palette.red : Palette.blue, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .animation(.spring(response: 0.4, dampingFraction: 1), value: progress)
                 .rotationEffect(.degrees(progress == nil && !failed && spin ? 270 : -90))
             Image(systemName: failed ? "xmark" : "arrow.down")
                 .font(.system(size: 7, weight: .heavy))
