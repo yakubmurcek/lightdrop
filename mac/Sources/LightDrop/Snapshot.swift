@@ -34,9 +34,15 @@ enum Snapshot {
                                     state: .done, saved: [URL(fileURLWithPath: "/Downloads/sunset.jpg")]) }),
             ("11-receiving-folder", { $0.incomingShown = true
                 $0.incoming = .init(ip: sam.ip, from: "Ondrejs-MacBook-Pro", name: "HousePlan", index: 1, count: 1, part: nil) }),
+            // A Mac without a notch: the island grows out of the top centre.
+            ("12-no-notch-near", { $0.phase = .near; $0.proximity = 0.9 }),
+            ("13-no-notch-hover", { $0.phase = .hover }),
+            ("14-no-notch-receiving", { $0.incomingShown = true
+                $0.incoming = .init(ip: sam.ip, from: "Sam", pic: "p", name: "sunset.jpg", index: 1, count: 1, part: 0.4) }),
         ]
         for (name, apply) in states {
-            let m = NotchModel(notchSize: CGSize(width: 185, height: 32), hasNotch: true)
+            let notch = !name.contains("no-notch")
+            let m = NotchModel(notchSize: notch ? CGSize(width: 185, height: 32) : CGSize(width: 190, height: 0), hasNotch: notch)
             m.targets = [sam]
             m.thumbnail = file
             m.fileCount = 1
@@ -46,7 +52,7 @@ enum Snapshot {
             let view = ZStack(alignment: .top) {
                 LinearGradient(colors: [Color(red: 0.16, green: 0.15, blue: 0.30), Color(red: 0.32, green: 0.28, blue: 0.52)],
                                startPoint: .top, endPoint: .bottom)
-                Rectangle().fill(Color(white: 0.13)).frame(height: 32)
+                Rectangle().fill(Color(white: 0.13)).frame(height: notch ? 32 : 24)
                 IslandView(model: m, urls: { [] })
             }
             .frame(width: 560, height: 220)

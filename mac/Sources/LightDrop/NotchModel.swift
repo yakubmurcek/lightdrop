@@ -144,7 +144,7 @@ final class NotchModel: ObservableObject {
     func hover(_ inside: Bool) {
         guard !busy else { return }
         if inside, phase != .hover { Haptics.tap() }
-        withAnimation(.spring(response: 0.46, dampingFraction: 0.6)) {
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.8)) {
             phase = inside ? .hover : (proximity > 0 ? .near : .idle)
             if !inside { hovered = nil }
         }
@@ -198,7 +198,7 @@ final class NotchModel: ObservableObject {
         case let .progress(id, got, total):
             guard id == incomingID, var cur = incoming, cur.state == .arriving else { return }
             if total > 0 { cur.part = min(1, Double(got) / Double(total)) }
-            withAnimation(.easeOut(duration: 0.3)) { incoming = cur }
+            withAnimation(.spring(response: 0.4, dampingFraction: 1)) { incoming = cur }
             if incomingShown { later(30) { [self] in failIncoming() } }
         case let .done(id, _, path):
             guard id == incomingID, var cur = incoming else { return }
@@ -322,13 +322,7 @@ final class NotchModel: ObservableObject {
         }
         if peer != nil { hovered = peer }
         let name = urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) items"
-        withAnimation(.spring(response: 0.5, dampingFraction: 0.66)) {
-            phase = .sending
-            progress = 0
-            pull = 0
-            title = name
-            detail = to.person
-        }
+        startSending(name, to: to)
         var done = 0
         Task {
             do {
@@ -336,7 +330,7 @@ final class NotchModel: ObservableObject {
                     switch ev {
                     case let .progress(_, sent, total):
                         let part = total > 0 ? min(Double(sent) / Double(total), 1) : 1
-                        withAnimation(.easeOut(duration: 0.2)) {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 1)) {
                             self.progress = (Double(done) + part) / Double(urls.count)
                         }
                     case .sent:
@@ -351,45 +345,126 @@ final class NotchModel: ObservableObject {
         return true
     }
 
-    /// `LightDrop --demo <file>`: plays approach, hover, send and delivered on its
-    /// own (no mouse, nothing sent), to watch or record the motion.
-    func playDemo(file: URL) async {
-        func wait(_ s: Double) async { try? await Task.sleep(nanoseconds: UInt64(s * 1e9)) }
-        lastLoad = .distantPast
-        dragBegan(urls: [file])
-        await wait(0.6)
-        for i in 0...40 {
-            let t = CGFloat(i) / 40
-            dragMoved(proximity: t, lean: 8 * sin(t * 3))
-            await wait(0.025)
-        }
-        hover(true)
-        for i in 0...90 {
-            hoverMoved(sin(Double(i) / 90 * .pi * 2) * 0.8)
-            await wait(0.02)
-        }
-        await wait(0.4)
-        let to = targets.first ?? Peer(name: "macbook", ip: "", owner: recipient, receiving: true, pic: lastPic)
+    private func startSending(_ name: String, to: Peer) {
         withAnimation(.spring(response: 0.5, dampingFraction: 0.66)) {
             phase = .sending
             progress = 0
             pull = 0
-            title = fileName
+            title = name
             detail = to.person
         }
-        for i in 1...30 {
-            withAnimation(.easeOut(duration: 0.2)) { progress = Double(i) / 30 }
-            await wait(0.04)
+    }
+
+    static let demoScenes = ["send", "pills", "offline", "retreat", "receive", "batch", "broken"]
+
+    /// `LightDrop --demo <file> [scene]`: plays a scene on its own (no mouse, nothing
+    /// sent or received, made-up computers), to watch or record the motion. Scenes
+    /// are `demoScenes`; without one, all of them in turn.
+    func playDemo(file: URL, scene: String?) async {
+        func wait(_ s: Double) async { try? await Task.sleep(nanoseconds: UInt64(s * 1e9)) }
+        let sam = Peer(name: "macbook", ip: "100.64.0.2", owner: "Sam Rivera", receiving: true, pic: lastPic)
+        let studio = Peer(name: "studio", ip: "100.64.0.3", owner: "Sam Rivera", receiving: true, pic: lastPic)
+        lastLoad = .distantFuture
+        known = [sam, studio]
+        let name = file.lastPathComponent
+
+        /// The cursor coming in from below at drag speed (the watcher's 60 Hz), leaning a little.
+        func approach(from: CGFloat = 0, to: CGFloat = 1, seconds: Double = 0.7) async {
+            let n = Int(seconds * 60)
+            for i in 0...n {
+                let p = from + (to - from) * CGFloat(i) / CGFloat(n)
+                dragMoved(proximity: p, lean: 6 * sin(p * 3))
+                await wait(1.0 / 60)
+            }
         }
-        succeed(to: to, name: fileName)
-        await wait(3)
+        /// Over the open island, sweeping from x0 to x1 (-1 … 1), picking pills as the drop delegate does.
+        func sweep(_ x0: CGFloat, _ x1: CGFloat, seconds: Double) async {
+            let n = Int(seconds * 60)
+            for i in 0...n {
+                let x = x0 + (x1 - x0) * CGFloat(i) / CGFloat(n)
+                hoverMoved(x)
+                if targets.count > 1 {
+                    let peer = targets[x < 0 ? 0 : 1]
+                    if peer != hovered { withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { hovered = peer } }
+                }
+                await wait(1.0 / 60)
+            }
+        }
+        func send(to peer: Peer) async {
+            startSending(name, to: peer)
+            for i in 1...14 {
+                await wait(0.15)
+                withAnimation(.spring(response: 0.4, dampingFraction: 1)) { progress = Double(i) / 14 }
+            }
+            succeed(to: peer, name: name)
+            await wait(3.2)
+        }
+        func receive(_ id: Int, index: Int = 1, count: Int = 1, seconds: Double = 2.4, fail: Bool = false) async {
+            arrival(.incoming(id: id, name: name, from: "macbook", ip: sam.ip, total: 1000, index: index, count: count))
+            let n = Int(seconds / 0.15)
+            for i in 1...n {
+                await wait(0.15)
+                if fail && i == n * 2 / 3 { return arrival(.failed(id: id)) }
+                arrival(.progress(id: id, got: Int64(1000 * i / n), total: 1000))
+            }
+            arrival(.done(id: id, saved: name, path: file.path))
+        }
+
+        for s in scene.map({ [$0] }) ?? Self.demoScenes {
+            targets = s == "offline" ? [] : s == "pills" ? [sam, studio] : [sam]
+            await wait(0.8)
+            switch s {
+            case "send", "pills", "offline":
+                dragBegan(urls: [file])
+                await approach()
+                // The preview comes in late, as it does for a big file: the icon first.
+                if s == "send" { thumbnail = NSWorkspace.shared.icon(forFile: file.path) }
+                hover(true)
+                await sweep(0, -0.6, seconds: 0.5)
+                if s == "send" { withAnimation(.easeOut(duration: 0.2)) { thumbnail = NSImage(contentsOf: file) } }
+                await sweep(-0.6, 0.6, seconds: 1)
+                await wait(0.3)
+                if s == "offline" {
+                    _ = drop([file], on: nil)
+                    await wait(3.8)
+                } else {
+                    await send(to: hovered ?? sam)
+                }
+            case "retreat":
+                // Comes close, backs off, comes in, slides out of the island, lets go nearby.
+                dragBegan(urls: [file])
+                await approach(to: 0.8, seconds: 0.6)
+                await approach(from: 0.8, to: 0.2, seconds: 0.5)
+                await approach(from: 0.2, to: 1, seconds: 0.5)
+                hover(true)
+                await wait(0.8)
+                hover(false)
+                await approach(from: 1, to: 0.6, seconds: 0.4)
+                await wait(0.3)
+                dragEnded()
+                await wait(1.5)
+            case "receive":
+                await receive(1)
+                await wait(4.5)
+            case "batch":
+                for i in 1...3 { await receive(10 + i, index: i, count: 3, seconds: 1.2) }
+                await wait(4.5)
+            case "broken":
+                await receive(20, fail: true)
+                await wait(3.5)
+            default:
+                break
+            }
+        }
+        // LIGHTDROP_DEMO_HOLD=<seconds> stays open at rest afterwards (to measure idle CPU).
+        await wait(Double(ProcessInfo.processInfo.environment["LIGHTDROP_DEMO_HOLD"] ?? "") ?? 0)
         exit(0)
     }
 
     private func succeed(to: Peer, name: String) {
         Haptics.success()
         NSSound(named: "Pop")?.play()
-        withAnimation(.spring(response: 0.5, dampingFraction: 0.5)) {
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.62)) {
             progress = 1
             phase = .sent
             title = "Delivered to \(to.person)"
