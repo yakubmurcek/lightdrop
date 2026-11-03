@@ -313,7 +313,9 @@ struct IslandView: View {
                      trace: motion.trace.paint(at: t), traced: motion.progress.value(at: t),
                      angle: .degrees(t * 70))
                 .frame(width: w, height: h)
-            content
+            // One container, so what follows applies once: on a bare conditional SwiftUI gives
+            // the outgoing content its own copy of the mask, frozen at the old outline.
+            ZStack(alignment: .top) { content }
                 .padding(.top, compact ? 0 : notch.height + 6)
                 // Round sides: keep content away from where the outline curves in.
                 .padding(.horizontal, sideInset)
