@@ -66,6 +66,17 @@ struct NotchShape: Shape {
     }
 }
 
+extension AnyTransition {
+    /// Content swapping inside a reshaping island: the old goes quickly, before the
+    /// outline cuts through it, and the new comes in as the outline gets there, so
+    /// the two never sit on top of each other.
+    static func content(scale: CGFloat = 0.95) -> AnyTransition {
+        .asymmetric(insertion: AnyTransition.opacity.combined(with: .scale(scale: scale, anchor: .top))
+                        .animation(.spring(response: 0.36, dampingFraction: 0.86).delay(0.1)),
+                    removal: AnyTransition.opacity.animation(.easeOut(duration: 0.14)))
+    }
+}
+
 /// Horizontal shake for a failed send.
 struct Shake: GeometryEffect {
     var travel: CGFloat
@@ -365,7 +376,7 @@ struct IslandView: View {
                 Group {
                     if arrival.state == .done { receivedContent(arrival) } else { arrivingContent(arrival) }
                 }
-                .transition(.opacity)
+                .transition(.content())
             } else {
                 Color.clear
             }
@@ -382,15 +393,15 @@ struct IslandView: View {
             .scaleEffect(0.8 + 0.2 * model.proximity)
             .blur(radius: 4 * (1 - model.proximity))
             .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.86), value: model.proximity)
+            .transition(.content())
         case .hover:
             Group {
                 if model.targets.count > 1 { pillsContent } else { handoffContent }
             }
-            .transition(.asymmetric(insertion: .scale(scale: 0.86, anchor: .top).combined(with: .opacity),
-                                    removal: .opacity))
+            .transition(.content(scale: 0.88))
         case .sending, .sent, .failed:
             statusContent
-                .transition(.scale(scale: 0.92).combined(with: .opacity))
+                .transition(.content())
         }
     }
 
