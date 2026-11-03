@@ -2,11 +2,17 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSafeName(t *testing.T) {
@@ -173,5 +179,50 @@ func TestParsePeersLabelsOwners(t *testing.T) {
 	}
 	if strings.Join(got, "|") != want {
 		t.Fatalf("got %q\nwant %q", strings.Join(got, "|"), want)
+	}
+}
+
+func TestReceiverTellsSubscribers(t *testing.T) {
+	sock, _ := os.MkdirTemp("", "ld") // a Unix socket path must stay short
+	defer os.RemoveAll(sock)
+	if err := events.listen(filepath.Join(sock, "s")); err != nil {
+		t.Fatal(err)
+	}
+	c, err := net.Dial("unix", filepath.Join(sock, "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	for !events.watched() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st, _ := os.Stat(filepath.Join(sock, "s")); st.Mode().Perm() != 0o600 {
+		t.Fatalf("socket mode %v, want 0600", st.Mode().Perm())
+	}
+
+	dir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handleSend(w, r, dir) }))
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/send?kind=file&name=a.txt&from=box&i=2&n=3", "", strings.NewReader("hello"))
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("upload: %v %v", resp, err)
+	}
+
+	sc := bufio.NewScanner(c)
+	var got []map[string]any
+	for len(got) < 2 && sc.Scan() {
+		var ev map[string]any
+		json.Unmarshal(sc.Bytes(), &ev)
+		if ev["event"] != "progress" {
+			got = append(got, ev)
+		}
+	}
+	in, done := got[0], got[1]
+	if in["event"] != "incoming" || in["name"] != "a.txt" || in["from"] != "box" || in["total"] != 5.0 ||
+		in["index"] != 2.0 || in["count"] != 3.0 || in["ip"] != "127.0.0.1" {
+		t.Fatalf("incoming = %v", in)
+	}
+	if done["event"] != "done" || done["saved"] != "a.txt" || done["path"] != filepath.Join(dir, "a.txt") || done["id"] != in["id"] {
+		t.Fatalf("done = %v", done)
 	}
 }

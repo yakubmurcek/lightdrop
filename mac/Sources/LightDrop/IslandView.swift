@@ -122,11 +122,23 @@ struct IslandView: View {
 
     private var notch: CGSize { model.notchSize }
 
+    /// A file arriving, while nothing else uses the island (a drag always wins).
+    private var arrival: NotchModel.Incoming? {
+        model.phase == .idle && model.incomingShown ? model.incoming : nil
+    }
+
+    /// Arriving: a sliver either side of the notch, no taller than the menu bar.
+    private var compact: Bool { arrival.map { $0.state != .done } ?? false }
+    static let ear: CGFloat = 33
+
     /// Island size per phase; "near" grows with proximity.
     private var size: CGSize {
         let idle = CGSize(width: notch.width + 12, height: max(notch.height, 1))
         switch model.phase {
-        case .idle: return idle
+        case .idle:
+            guard let arrival else { return idle }
+            return arrival.state == .done ? CGSize(width: 360, height: notch.height + 58)
+                : CGSize(width: notch.width + 2 * Self.ear, height: max(notch.height, 24))
         case .near:
             let p = model.proximity
             return CGSize(width: idle.width + 120 * p, height: idle.height + 42 * p)
@@ -143,7 +155,7 @@ struct IslandView: View {
 
     private var expanded: CGFloat {
         switch model.phase {
-        case .idle: 0
+        case .idle: arrival?.state == .done ? 0.6 : 0
         case .near: model.proximity
         default: 1
         }
@@ -159,7 +171,7 @@ struct IslandView: View {
 
     private var roundness: CGFloat {
         switch model.phase {
-        case .idle: 6
+        case .idle: arrival?.state == .done ? 3.4 : 6
         case .near: 6 - 3 * model.proximity
         case .hover: 2.8
         case .sending, .sent, .failed: 3.4
@@ -200,9 +212,9 @@ struct IslandView: View {
                         .shadow(color: .black.opacity(0.5 * expanded), radius: 26 * expanded, y: 10 * expanded)
                     Rim(shape: shape, model: model, angle: .degrees(t * 70))
                     content
-                        .padding(.top, notch.height + 6)
+                        .padding(.top, compact ? 0 : notch.height + 6)
                         // Round sides: keep content away from where the outline curves in.
-                        .padding(.horizontal, model.phase == .near ? 24 : model.phase == .hover && model.targets.count < 2 ? 58 : 46)
+                        .padding(.horizontal, sideInset)
                         .frame(width: w, height: h, alignment: .top)
                         // Contents bob with the jiggle, a beat behind the outline.
                         .scaleEffect(1 + 0.03 * k * sin(t * 17), anchor: .top)
@@ -212,7 +224,7 @@ struct IslandView: View {
             }
             .scaleEffect(targeted && model.phase == .hover ? 1.03 : 1, anchor: .top)
             .modifier(Shake(travel: CGFloat(model.shakes)))
-            .opacity(model.hasNotch || model.phase != .idle ? 1 : 0)
+            .opacity(model.hasNotch || model.phase != .idle || model.incomingShown ? 1 : 0)
             .contentShape(Rectangle())
             .onDrop(of: [UTType.fileURL],
                     delegate: IslandDrop(model: model, width: w, urls: urls, targeted: $targeted))
@@ -221,7 +233,10 @@ struct IslandView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { w = size.width; h = size.height }
         .onChange(of: size) { new in
-            if model.phase == .near || model.phase == .idle && new.height < 40 {
+            if model.phase == .idle && model.incoming != nil {
+                // Receiving opens and closes calmly: no jelly while someone's working.
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.86)) { w = new.width; h = new.height }
+            } else if model.phase == .near || model.phase == .idle && new.height < 40 {
                 withAnimation(.interactiveSpring(response: 0.36, dampingFraction: 0.5)) { w = new.width }
                 withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.42)) { h = new.height }
             } else {
@@ -231,10 +246,26 @@ struct IslandView: View {
         }
     }
 
+    private var sideInset: CGFloat {
+        switch model.phase {
+        case .idle: compact ? 6 : 40
+        case .near: 24
+        case .hover: model.targets.count < 2 ? 58 : 46
+        default: 46
+        }
+    }
+
     @ViewBuilder private var content: some View {
         switch model.phase {
         case .idle:
-            Color.clear
+            if let arrival {
+                Group {
+                    if arrival.state == .done { receivedContent(arrival) } else { arrivingContent(arrival) }
+                }
+                .transition(.opacity)
+            } else {
+                Color.clear
+            }
         case .near:
             HStack(spacing: 8) {
                 Avatar(name: model.recipient, photo: model.recipientPhoto, size: 22)
@@ -354,6 +385,48 @@ struct IslandView: View {
         .padding(.top, 4)
     }
 
+    /// Who sends it on the left of the notch, the progress on the right.
+    private func arrivingContent(_ a: NotchModel.Incoming) -> some View {
+        HStack(spacing: 0) {
+            Avatar(name: a.from, photo: a.pic.flatMap { model.photos[$0] }, size: 20)
+            Spacer(minLength: 0)
+            ArrivalRing(progress: a.progress, failed: a.state == .failed)
+        }
+        .frame(height: max(notch.height, 24))
+    }
+
+    /// The file is in: its preview, its name and who it's from, for a moment.
+    private func receivedContent(_ a: NotchModel.Incoming) -> some View {
+        HStack(spacing: 12) {
+            FileCard(image: model.incomingThumb, count: a.saved.count, small: false, still: true)
+                .scaleEffect(0.8)
+                .frame(width: 40, height: 40)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(a.title)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("from \(a.from) · in Downloads")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            ZStack(alignment: .bottomTrailing) {
+                Avatar(name: a.from, photo: a.pic.flatMap { model.photos[$0] }, size: 30)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 7, weight: .heavy))
+                    .foregroundStyle(.black)
+                    .frame(width: 14, height: 14)
+                    .background(Circle().fill(Palette.green))
+                    .overlay(Circle().stroke(.black, lineWidth: 1.5))
+                    .offset(x: 3, y: 3)
+            }
+        }
+        .padding(.top, 1)
+    }
+
     private var statusDetail: String {
         model.phase == .sending ? model.title : model.detail
     }
@@ -389,7 +462,19 @@ struct Rim: View {
                 case .near:
                     shape.stroke(Color.white.opacity(0.08 * model.proximity), lineWidth: 1)
                 case .idle:
-                    EmptyView()
+                    if model.incomingShown, let a = model.incoming {
+                        switch a.state {
+                        // The edge fills as the file comes in, faintly.
+                        case .arriving:
+                            glow(LinearGradient(colors: [Palette.blue, Palette.violet], startPoint: .leading, endPoint: .trailing),
+                                 opacity: 0.5, trim: a.progress ?? 0)
+                        case .done:
+                            glow(LinearGradient(colors: [Palette.green, Palette.green.opacity(0.6)], startPoint: .top, endPoint: .bottom),
+                                 opacity: 0.6)
+                        case .failed:
+                            EmptyView()
+                        }
+                    }
                 }
             }
             .allowsHitTesting(false)
@@ -414,6 +499,8 @@ struct FileCard: View {
     let image: NSImage?
     let count: Int
     var small = false
+    /// No bobbing (the receive view keeps still).
+    var still = false
     @State private var lifted = false
 
     var body: some View {
@@ -442,8 +529,34 @@ struct FileCard: View {
             }
         }
         .onAppear {
-            guard !small else { return }
+            guard !small, !still else { return }
             withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) { lifted = true }
+        }
+    }
+}
+
+/// Progress of a file coming in: a thin ring around a small arrow. Spins slowly
+/// when the size is unknown (a folder from an older sender), red if it broke off.
+struct ArrivalRing: View {
+    let progress: Double?
+    let failed: Bool
+    @State private var spin = false
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(.white.opacity(0.14), lineWidth: 2)
+            Circle()
+                .trim(from: 0, to: failed ? 1 : progress.map { max(0.03, $0) } ?? 0.25)
+                .stroke(failed ? Palette.red : Palette.blue, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .rotationEffect(.degrees(progress == nil && !failed && spin ? 270 : -90))
+            Image(systemName: failed ? "xmark" : "arrow.down")
+                .font(.system(size: 7, weight: .heavy))
+                .foregroundStyle(.white.opacity(0.85))
+        }
+        .frame(width: 17, height: 17)
+        .onAppear {
+            guard progress == nil, !Snapshot.active else { return }
+            withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) { spin = true }
         }
     }
 }

@@ -34,6 +34,13 @@ stay in one place. "The other person" = online computers that are receiving and 
 another tailnet user (`lightdrop peers`); one → the island is the target, several → one
 pill each. It starts at login (Login Items) and quits from its menu-bar icon.
 
+Receiving shows there too, without getting in the way: while a file comes in, the sender's
+photo sits left of the notch and a progress ring right of it, inside the menu bar (nothing
+to click, no sound). When it's in, a small card shows the file and who sent it for a few
+seconds, then folds away; a whole send of several files gets one card. The menu-bar icon
+lists the last files received (click one to show it in Finder). While the app runs, the
+receiver skips its desktop notification, so a file never alerts twice.
+
 Testing alone: `defaults write com.lightdrop.notch includeOwnDevices -bool YES` counts your
 own computers as targets.
 
@@ -42,6 +49,9 @@ own computers as targets.
 - Every machine runs a receiver on its **Tailscale IP only**, port 8765. It accepts
   uploads and nothing else: no listing, no downloads, so nobody can read or guess
   what is in your Downloads. Only `GET /ping` answers (so senders can find receivers).
+- What is arriving (name, sender, bytes so far) goes to a Unix socket only you can open
+  (`~/Library/Caches/lightdrop-receiver.sock`, Linux `~/.cache/…`), never over Tailscale.
+  `lightdrop events` prints it live; the Mac app reads it with `--json`.
 - Files go straight into `~/Downloads`. A taken name becomes `name 2.ext`, `name 3.ext`…,
   decided by the receiver: nothing is ever overwritten, and the sender learns nothing
   about what exists there.
