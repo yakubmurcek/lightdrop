@@ -5,11 +5,14 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -182,42 +185,61 @@ func TestParsePeersLabelsOwners(t *testing.T) {
 	}
 }
 
-func TestReceiverTellsSubscribers(t *testing.T) {
+// subscribe opens a fresh event socket and connects to it, like the Mac app does.
+func subscribe(t *testing.T) (*bufio.Scanner, net.Conn, string) {
+	t.Helper()
 	sock, _ := os.MkdirTemp("", "ld") // a Unix socket path must stay short
-	defer os.RemoveAll(sock)
-	if err := events.listen(filepath.Join(sock, "s")); err != nil {
+	t.Cleanup(func() { os.RemoveAll(sock) })
+	path := filepath.Join(sock, "s")
+	if err := events.listen(path); err != nil {
 		t.Fatal(err)
 	}
-	c, err := net.Dial("unix", filepath.Join(sock, "s"))
+	c, err := net.Dial("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	t.Cleanup(func() { c.Close() })
 	for !events.watched() {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if st, _ := os.Stat(filepath.Join(sock, "s")); st.Mode().Perm() != 0o600 {
-		t.Fatalf("socket mode %v, want 0600", st.Mode().Perm())
-	}
+	return bufio.NewScanner(c), c, path
+}
 
-	dir := t.TempDir()
+// next returns the next event that isn't progress.
+func next(t *testing.T, sc *bufio.Scanner) map[string]any {
+	t.Helper()
+	for sc.Scan() {
+		var ev map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+			t.Fatalf("bad event line %q", sc.Bytes())
+		}
+		if ev["event"] != "progress" {
+			return ev
+		}
+	}
+	t.Fatal("event stream ended")
+	return nil
+}
+
+func receiver(t *testing.T, dir string) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handleSend(w, r, dir) }))
-	defer srv.Close()
-	resp, err := http.Post(srv.URL+"/send?kind=file&name=a.txt&from=box&i=2&n=3", "", strings.NewReader("hello"))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestReceiverTellsSubscribers(t *testing.T) {
+	sc, _, path := subscribe(t)
+	if runtime.GOOS != "windows" { // Windows has no Unix permission bits
+		if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+			t.Fatalf("socket mode %v, want 0600", st.Mode().Perm())
+		}
+	}
+	dir := t.TempDir()
+	resp, err := http.Post(receiver(t, dir).URL+"/send?kind=file&name=a.txt&from=box&i=2&n=3", "", strings.NewReader("hello"))
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("upload: %v %v", resp, err)
 	}
-
-	sc := bufio.NewScanner(c)
-	var got []map[string]any
-	for len(got) < 2 && sc.Scan() {
-		var ev map[string]any
-		json.Unmarshal(sc.Bytes(), &ev)
-		if ev["event"] != "progress" {
-			got = append(got, ev)
-		}
-	}
-	in, done := got[0], got[1]
+	in, done := next(t, sc), next(t, sc)
 	if in["event"] != "incoming" || in["name"] != "a.txt" || in["from"] != "box" || in["total"] != 5.0 ||
 		in["index"] != 2.0 || in["count"] != 3.0 || in["ip"] != "127.0.0.1" {
 		t.Fatalf("incoming = %v", in)
@@ -225,4 +247,139 @@ func TestReceiverTellsSubscribers(t *testing.T) {
 	if done["event"] != "done" || done["saved"] != "a.txt" || done["path"] != filepath.Join(dir, "a.txt") || done["id"] != in["id"] {
 		t.Fatalf("done = %v", done)
 	}
+}
+
+func TestReceiverReportsProgress(t *testing.T) {
+	sc, _, _ := subscribe(t)
+	pr, pw := io.Pipe()
+	go func() {
+		// Two halves with a pause between, so at least one progress report falls in between.
+		pw.Write(bytes.Repeat([]byte("x"), 1000))
+		time.Sleep(200 * time.Millisecond)
+		pw.Write(bytes.Repeat([]byte("x"), 1000))
+		pw.Close()
+	}()
+	req, _ := http.NewRequest(http.MethodPost, receiver(t, t.TempDir()).URL+"/send?kind=file&name=b.bin", pr)
+	req.ContentLength = 2000
+	go http.DefaultClient.Do(req)
+	var got []float64
+	for sc.Scan() {
+		var ev map[string]any
+		json.Unmarshal(sc.Bytes(), &ev)
+		if ev["event"] == "progress" {
+			if ev["total"] != 2000.0 {
+				t.Fatalf("progress total = %v", ev["total"])
+			}
+			got = append(got, ev["got"].(float64))
+		}
+		if ev["event"] == "done" {
+			break
+		}
+	}
+	if len(got) == 0 || got[0] < 1000 || got[0] > 2000 {
+		t.Fatalf("progress reports %v", got)
+	}
+}
+
+func TestFolderEventsUseSizeAndReportFailure(t *testing.T) {
+	sc, _, _ := subscribe(t)
+	dir := t.TempDir()
+	// A folder streams without a length: the sender's size estimate stands in.
+	req, _ := http.NewRequest(http.MethodPost, receiver(t, dir).URL+"/send?kind=dir&name=F&size=4096",
+		io.MultiReader(strings.NewReader("not a tar archive at all"))) // hides the length, as a stream does
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("broken archive: %v %v", resp, err)
+	}
+	in, failed := next(t, sc), next(t, sc)
+	if in["event"] != "incoming" || in["kind"] != "dir" || in["total"] != 4096.0 || in["index"] != nil {
+		t.Fatalf("incoming = %v", in)
+	}
+	if failed["event"] != "failed" || failed["id"] != in["id"] {
+		t.Fatalf("failed = %v", failed)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("left behind: %v", entries)
+	}
+}
+
+func TestReceiverRefusesBadRequests(t *testing.T) {
+	dir := t.TempDir()
+	u := receiver(t, dir).URL
+	if r, _ := http.Get(u + "/send?kind=file&name=a"); r.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /send = %d", r.StatusCode)
+	}
+	for _, q := range []string{"kind=file&name=..", "kind=file&name=", "kind=exe&name=a", "kind=file&name=a&i=4&n=3"} {
+		r, err := http.Post(u+"/send?"+q, "", strings.NewReader("x"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A batch position that makes no sense is ignored, not refused.
+		want := http.StatusBadRequest
+		if strings.HasSuffix(q, "n=3") {
+			want = http.StatusOK
+		}
+		if r.StatusCode != want {
+			t.Fatalf("%s = %d, want %d", q, r.StatusCode, want)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("Downloads holds %d entries, want only the valid upload", len(entries))
+	}
+}
+
+func TestHubForgetsSubscribersThatLeave(t *testing.T) {
+	_, c, _ := subscribe(t)
+	c.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for events.watched() {
+		if time.Now().After(deadline) {
+			t.Fatal("a closed subscriber still counts as watching")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	events.emit(map[string]any{"event": "progress"}) // must not block or panic
+}
+
+func TestSendAnnouncesBatchAndFolderSize(t *testing.T) {
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		io.Copy(io.Discard, r.Body)
+		io.WriteString(w, r.URL.Query().Get("name"))
+	}))
+	defer srv.Close()
+	host, p, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if p != strconv.Itoa(port) {
+		// sendOne dials the lightdrop port; test the URL it builds through a client that redirects.
+		http.DefaultClient.Transport = rewritePort{host + ":" + p}
+		defer func() { http.DefaultClient.Transport = nil }()
+	}
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "a.txt"), []byte("one"), 0o644)
+	os.Mkdir(filepath.Join(src, "dir"), 0o755)
+	os.WriteFile(filepath.Join(src, "dir", "b.txt"), []byte("two"), 0o644)
+	jsonOut = true
+	defer func() { jsonOut = false }()
+	to := peer{Name: "box", IP: host}
+	if err := sendOne(to, filepath.Join(src, "a.txt"), 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := sendOne(to, filepath.Join(src, "dir"), 2, 2); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(queries[0], "i=1&n=2") || strings.Contains(queries[0], "size=") {
+		t.Fatalf("file query %q", queries[0])
+	}
+	if !strings.Contains(queries[1], "kind=dir") || !strings.Contains(queries[1], "i=2&n=2") || !strings.Contains(queries[1], "&size=") {
+		t.Fatalf("folder query %q", queries[1])
+	}
+}
+
+// rewritePort sends every request to the test server instead of port 8765.
+type rewritePort struct{ addr string }
+
+func (r rewritePort) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.URL.Host = r.addr
+	return http.DefaultTransport.RoundTrip(req)
 }
