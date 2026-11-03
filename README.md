@@ -7,8 +7,8 @@ Files go straight from one computer to the other and land in Downloads. Mac, Lin
 
 1. **Install Tailscale** and join the network (the invite link you got).
 2. **Install lightdrop**: paste one line into a terminal (Mac: Terminal app; Windows: PowerShell).
-   - Mac / Linux: `curl -fsSL https://gist.githubusercontent.com/yakubmurcek/7cc69d2af1db4b710846e113a69fcae2/raw/install.sh | sh`
-   - Windows: `irm https://gist.githubusercontent.com/yakubmurcek/7cc69d2af1db4b710846e113a69fcae2/raw/install.ps1 | iex`
+   - Mac / Linux: `curl -fsSL https://github.com/yakubmurcek/lightdrop/releases/latest/download/install.sh | sh`
+   - Windows: `irm https://github.com/yakubmurcek/lightdrop/releases/latest/download/install.ps1 | iex`
 
    From now on your computer receives files in the background, also after a restart.
 3. **Send**:
@@ -77,8 +77,9 @@ folder to the PATH (the login shell's startup file; Windows: the user PATH).
 ```
 bash build.sh        # needs Go: vet, test, binaries for every platform into dist/
 bash build-app.sh    # Mac with Xcode: dist/LightDrop-app.zip
-bash publish.sh      # push dist/ and the installers to the gist the install lines download from
+bash publish.sh      # a GitHub release of dist/ and the installers; install lines fetch the latest
 ```
 
-`publish.sh` pushes to the owner's gist. In a fork, point `GIST` in `publish.sh` and the
-URLs in `install.sh`, `install.ps1` and this README at your own gist.
+The first install lines pointed at a gist; its `install.sh` and `install.ps1` now just run the
+ones from the latest release, so those lines keep working. In a fork, change `REPO` in
+`publish.sh` and the URLs in `install.sh`, `install.ps1` and this README.
