@@ -279,8 +279,14 @@ struct IslandView: View {
                 let now = Snapshot.active ? model.kickedAt.addingTimeInterval(5) : tl.date
                 island(look, at: now.timeIntervalSinceReferenceDate)
             }
+            // Laid out at the size it's headed for (the drawing may run past it while it
+            // moves), which is also where a drop counts.
+            .frame(width: look.size.width, height: look.size.height, alignment: .top)
             .modifier(Shake(travel: CGFloat(model.shakes)))
             .opacity(model.hasNotch || model.phase != .idle || model.incomingShown ? 1 : 0)
+            .contentShape(Rectangle())
+            .modifier(DropArea(active: !Snapshot.active,
+                               delegate: IslandDrop(model: model, width: look.size.width, urls: urls, targeted: $targeted)))
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -340,9 +346,6 @@ struct IslandView: View {
                 // cross-fade it from the last one, and the old outline would show content
                 // outside the island for as long as that lasts.
                 .transaction { $0.animation = nil }
-                .contentShape(Rectangle())
-                .modifier(DropArea(active: !Snapshot.active,
-                                   delegate: IslandDrop(model: model, width: look.size.width, urls: urls, targeted: $targeted)))
         }
     }
 
@@ -535,6 +538,8 @@ struct IslandView: View {
                     .foregroundStyle(.white.opacity(0.5))
                     .lineLimit(1)
             }
+            // The sender's name can come in late (their computer's name until then).
+            .animation(.easeOut(duration: 0.25), value: a.from)
             Spacer(minLength: 0)
             ZStack(alignment: .bottomTrailing) {
                 Avatar(name: a.from, photo: a.pic.flatMap { model.photos[$0] }, size: 30)
@@ -632,13 +637,15 @@ struct FileCard: View {
     var body: some View {
         let s: CGFloat = small ? 22 : 46
         ZStack(alignment: .topTrailing) {
-            Group {
+            ZStack {
                 if let image {
                     Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
                 } else {
                     Image(systemName: "doc.fill").resizable().aspectRatio(contentMode: .fit).foregroundStyle(.white.opacity(0.8))
                 }
             }
+            // The Quick Look preview replaces the icon when it's ready: a fade, not a swap.
+            .animation(.easeOut(duration: 0.2), value: image)
             .frame(width: s, height: s)
             .clipShape(RoundedRectangle(cornerRadius: small ? 5 : 11, style: .continuous))
             .shadow(color: .black.opacity(0.6), radius: 6, y: 3)
@@ -750,6 +757,9 @@ struct Avatar: View {
         .opacity(dimmed ? 0.5 : 1)
         .scaleEffect(glow ? 1.08 : 1)
         .animation(.spring(response: 0.35, dampingFraction: 0.5), value: glow)
+        // The photo and the name can arrive after the person is already on screen.
+        .animation(.easeOut(duration: 0.25), value: photo)
+        .animation(.easeOut(duration: 0.25), value: name)
     }
 }
 

@@ -417,8 +417,11 @@ final class NotchModel: ObservableObject {
             case "send", "pills", "offline":
                 dragBegan(urls: [file])
                 await approach()
+                // The preview comes in late, as it does for a big file: the icon first.
+                if s == "send" { thumbnail = NSWorkspace.shared.icon(forFile: file.path) }
                 hover(true)
                 await sweep(0, -0.6, seconds: 0.5)
+                if s == "send" { withAnimation(.easeOut(duration: 0.2)) { thumbnail = NSImage(contentsOf: file) } }
                 await sweep(-0.6, 0.6, seconds: 1)
                 await wait(0.3)
                 if s == "offline" {
