@@ -1,10 +1,10 @@
 #!/bin/sh
 # lightdrop installer for macOS and Linux:
-#   curl -fsSL https://gist.githubusercontent.com/yakubmurcek/7cc69d2af1db4b710846e113a69fcae2/raw/install.sh | sh
+#   curl -fsSL https://github.com/yakubmurcek/lightdrop/releases/latest/download/install.sh | sh
 # Downloads the binary for this machine and starts the background receiver; on a
 # Mac also the LightDrop notch app (drag a file to the notch to send it).
 set -eu
-BASE=https://gist.githubusercontent.com/yakubmurcek/7cc69d2af1db4b710846e113a69fcae2/raw
+BASE=https://github.com/yakubmurcek/lightdrop/releases/latest/download
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64)  t=darwin-arm64 ;;
   Darwin-x86_64) t=darwin-amd64 ;;

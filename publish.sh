@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
-# Publish a fresh build to the lightdrop gist (where the installers download
-# from). Run after build.sh: bash publish.sh
+# Publish a fresh build as a GitHub release: the install lines download from the
+# latest one. Run after build.sh (and build-app.sh on a Mac): bash publish.sh
 set -euo pipefail
-git() { command git -c credential.helper= -c "credential.helper=!gh auth git-credential" "$@"; }
 cd "$(dirname "$0")"
-GIST=7cc69d2af1db4b710846e113a69fcae2
-work=$(mktemp -d)
-trap 'rm -r "$work"' EXIT
-git clone -q "https://gist.github.com/$GIST.git" "$work"
-cp dist/lightdrop-* install.sh install.ps1 "$work/"
-# The Mac app is built on a Mac (build-app.sh) and copied into dist/ here first.
-cp dist/LightDrop-app.zip "$work/" 2>/dev/null || echo "no dist/LightDrop-app.zip: the Mac app is not updated"
-rm -f "$work/drop" "$work/drop.ps1"   # the dufs-based predecessor
-cd "$work"
-git add -A
-git -c user.name="lightdrop build" -c user.email=noreply@example.com commit -qm "lightdrop build" || echo "nothing changed"
-git push -q "$@"
+REPO=yakubmurcek/lightdrop
+git push -q origin HEAD   # the release's tag points at this commit
+tag=v$(date +%Y.%m.%d) n=1
+while gh release view "$tag" -R "$REPO" >/dev/null 2>&1; do n=$((n + 1)); tag=v$(date +%Y.%m.%d).$n; done
+files=(dist/lightdrop-* install.sh install.ps1)
+# The Mac app is built on a Mac (build-app.sh); without it Macs keep the app they have.
+if [ -f dist/LightDrop-app.zip ]; then files+=(dist/LightDrop-app.zip); else echo "no dist/LightDrop-app.zip: the Mac app is not updated"; fi
+gh release create "$tag" -R "$REPO" --target "$(git rev-parse HEAD)" --title "lightdrop $tag" \
+  --notes "Install or update: run the install line from the README." "${files[@]}"
