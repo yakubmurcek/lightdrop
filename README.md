@@ -5,6 +5,8 @@
 AirDrop in the terminal, between your computers and your friends' computers, over Tailscale.
 Files go straight from one computer to the other and land in Downloads. Mac, Linux and Windows.
 
+![The LightDrop island on a Mac: drag a file to the notch, it's delivered, and the other person sees it arrive](docs/notch.png)
+
 ## Use it
 
 1. **Install Tailscale** and join the network (the invite link you got).
@@ -23,6 +25,7 @@ Files go straight from one computer to the other and land in Downloads. Mac, Lin
 lightdrop report.pdf              # pick an online computer, it lands in their Downloads
 lightdrop -t macbook photos/      # -t names the computer and skips the picker
 lightdrop uninstall               # stop receiving
+lightdrop version                 # which release you have (compare with the latest on GitHub)
 ```
 
 Update: run the install line again. Phones are not supported.
@@ -44,7 +47,9 @@ lists the last files received (click one to show it in Finder). While the app ru
 receiver skips its desktop notification, so a file never alerts twice.
 
 Testing alone: `defaults write com.lightdrop.notch includeOwnDevices -bool YES` counts your
-own computers as targets.
+own computers as targets. If someone's computer is online but doesn't answer on port 8765,
+the island says "Sam isn't receiving" (they re-run the install line, or the tailnet policy
+blocks the port), and the terminal picker lists it under "online, not receiving".
 
 ## How it works
 

@@ -29,12 +29,16 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - run: bash build.sh
-      - run: bash build-app.sh
-      - name: release
+      - name: tag
         run: |
           tag=v$(date -u +%Y.%m.%d) n=1
           while gh release view "$tag" >/dev/null 2>&1; do n=$((n + 1)); tag=v$(date -u +%Y.%m.%d).$n; done
+          echo "VERSION=$tag" >> "$GITHUB_ENV"
+      - run: bash build.sh # stamps $VERSION into the binaries
+      - run: bash build-app.sh
+      - name: release
+        run: |
+          tag=$VERSION
           gh release create "$tag" --target "$GITHUB_SHA" --title "lightdrop $tag" \
             --notes "Install or update: run the install line from the README." \
             dist/lightdrop-* dist/LightDrop-app.zip install.sh install.ps1
