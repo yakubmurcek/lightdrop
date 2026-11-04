@@ -9,7 +9,11 @@ struct Peer: Decodable, Hashable, Identifiable {
     let receiving: Bool
     /// The owner's Tailscale profile picture URL.
     let pic: String?
+    /// Tailscale's name for its system ("macOS", "iOS"…); older CLIs leave it out.
+    var os: String? = nil
     var id: String { ip }
+    /// lightdrop doesn't run on phones, so one is never "not receiving".
+    var isPhone: Bool { os == "iOS" || os == "android" }
 
     /// First name of the owner ("Sam Rivera" → "Sam"); your own computers go by their name.
     var person: String {
@@ -26,11 +30,17 @@ enum Lightdrop {
 
     static var isInstalled: Bool { FileManager.default.isExecutableFile(atPath: binary.path) }
 
-    /// Online computers that are receiving and belong to someone else. With the
-    /// `includeOwnDevices` default on (testing alone), your own count too.
-    static func targets() async throws -> [Peer] {
-        let own = UserDefaults.standard.bool(forKey: "includeOwnDevices")
-        return try await peers().filter { $0.receiving && !$0.owner.isEmpty && ($0.owner != "you" || own) }
+    /// Online computers that belong to someone else, split into those receiving
+    /// (where a drop can go) and those online but not answering on lightdrop's port
+    /// (so the island can say "Sam isn't receiving" instead of "isn't online").
+    /// With the `includeOwnDevices` default on (testing alone), your own count too.
+    static func targets() async throws -> (receiving: [Peer], idle: [Peer]) {
+        split(try await peers(), own: UserDefaults.standard.bool(forKey: "includeOwnDevices"))
+    }
+
+    static func split(_ peers: [Peer], own: Bool) -> (receiving: [Peer], idle: [Peer]) {
+        let people = peers.filter { !$0.owner.isEmpty && ($0.owner != "you" || own) }
+        return (people.filter(\.receiving), people.filter { !$0.receiving && !$0.isPhone })
     }
 
     /// Every online computer, yours included (to name who a file comes from).

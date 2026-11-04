@@ -435,7 +435,7 @@ struct IslandView: View {
 
     private var headline: String {
         if model.loadingTargets && model.targets.isEmpty { return "Looking for \(model.recipient.isEmpty ? "them" : model.recipient)…" }
-        if model.targets.isEmpty { return model.recipient.isEmpty ? "Nobody's receiving" : "\(model.recipient) isn't online" }
+        if model.targets.isEmpty { return model.nobodyReason.headline }
         return "Send to \(model.recipient)"
     }
 

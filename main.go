@@ -61,6 +61,9 @@ const (
 // jsonOut: machine-readable output for the Mac app (--json).
 var jsonOut bool
 
+// version is the release tag, set at build time (-X main.version=v2026.11.04).
+var version = "dev"
+
 func main() {
 	var args []string
 	for _, a := range os.Args[1:] {
@@ -76,6 +79,8 @@ func main() {
 	}
 	var err error
 	switch args[0] {
+	case "version", "--version", "-v":
+		fmt.Println("lightdrop", version)
 	case "install":
 		err = install()
 	case "uninstall":
@@ -112,6 +117,8 @@ lightdrop install                 receive in the background (files land in Downl
 lightdrop uninstall               stop receiving
 lightdrop peers                   online computers, as JSON
 lightdrop events                  what is arriving here, live
+
+lightdrop version                 which release this is
 
 Update: run the install line again.
 `)
@@ -170,8 +177,12 @@ func selfIP() (string, error) {
 }
 
 // Owner is who the device belongs to: "you", a person's name, or "" for a server;
-// Pic is the owner's profile picture URL (the Mac app shows it).
-type peer struct{ Name, IP, Owner, Pic string }
+// Pic is the owner's profile picture URL (the Mac app shows it); OS is Tailscale's
+// name for the system ("macOS", "iOS", "android"…).
+type peer struct{ Name, IP, Owner, Pic, OS string }
+
+// phone: lightdrop doesn't run on phones, so they are never "not receiving".
+func (p peer) phone() bool { return p.OS == "iOS" || p.OS == "android" }
 
 func (p peer) label() string {
 	if p.Owner == "" {
@@ -200,6 +211,7 @@ func parsePeers(statusJSON []byte) ([]peer, error) {
 		Peer map[string]struct {
 			DNSName      string
 			HostName     string
+			OS           string
 			Online       bool
 			TailscaleIPs []string
 			UserID       int64
@@ -228,7 +240,7 @@ func parsePeers(statusJSON []byte) ([]peer, error) {
 				owner = u.LoginName
 			}
 		}
-		ps = append(ps, peer{name, ip, owner, pic})
+		ps = append(ps, peer{name, ip, owner, pic, p.OS})
 	}
 	sort.Slice(ps, func(i, j int) bool { return ps[i].label() < ps[j].label() })
 	return ps, nil
@@ -262,6 +274,9 @@ func isReceiver(ip string) bool {
 func sendAll(to string, paths []string) error {
 	for _, p := range paths {
 		if _, err := os.Stat(p); err != nil {
+			if strings.HasPrefix(p, "-") {
+				return fmt.Errorf("unknown option %s (lightdrop --help)", p)
+			}
 			return fmt.Errorf("no such file or folder: %s", p)
 		}
 	}
@@ -289,11 +304,12 @@ func printPeers() error {
 		Owner     string `json:"owner"`
 		Receiving bool   `json:"receiving"`
 		Pic       string `json:"pic,omitempty"`
+		OS        string `json:"os,omitempty"`
 	}
 	rows := make([]row, len(ps))
 	var wg sync.WaitGroup
 	for i, p := range ps {
-		rows[i] = row{p.Name, p.IP, p.Owner, false, p.Pic}
+		rows[i] = row{p.Name, p.IP, p.Owner, false, p.Pic, p.OS}
 		wg.Add(1)
 		go func(i int, ip string) {
 			defer wg.Done()
@@ -336,27 +352,34 @@ func pickTarget(to string) (peer, error) {
 	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	var rs []peer
+	var rs, idle []peer
 	for _, p := range ps {
 		wg.Add(1)
 		go func(p peer) {
 			defer wg.Done()
-			if isReceiver(p.IP) {
-				mu.Lock()
+			on := isReceiver(p.IP)
+			mu.Lock()
+			if on {
 				rs = append(rs, p)
-				mu.Unlock()
+			} else {
+				idle = append(idle, p)
 			}
+			mu.Unlock()
 		}(p)
 	}
 	wg.Wait()
 	sort.Slice(rs, func(i, j int) bool { return rs[i].label() < rs[j].label() })
+	note := notReceiving(idle)
 	if len(rs) == 0 {
-		return peer{}, errors.New("no device is receiving (on the other machine: lightdrop install)")
+		return peer{}, errors.New("no device is receiving (on the other machine: run the install line)" + note)
 	}
 	// Always ask, even with one receiver: with friends on the tailnet the only
 	// one online may be someone else's computer.
 	for i, p := range rs {
 		fmt.Printf("  %d) %s\n", i+1, p.label())
+	}
+	if note != "" {
+		fmt.Println(strings.TrimPrefix(note, "\n"))
 	}
 	fmt.Print("send to: ")
 	var line string
@@ -366,6 +389,23 @@ func pickTarget(to string) (peer, error) {
 		return peer{}, errors.New("no such choice")
 	}
 	return rs[n-1], nil
+}
+
+// notReceiving names other people's computers that are online but don't answer
+// on lightdrop's port, so a friend missing from the picker has a reason ("" if
+// none). Servers, phones and your own devices are left out: they rarely receive.
+func notReceiving(idle []peer) string {
+	var ls []string
+	for _, p := range idle {
+		if p.Owner != "" && p.Owner != "you" && !p.phone() {
+			ls = append(ls, p.label())
+		}
+	}
+	if len(ls) == 0 {
+		return ""
+	}
+	sort.Strings(ls)
+	return "\n  online, not receiving: " + strings.Join(ls, ", ")
 }
 
 // sendOne sends the i-th of n paths (the receiver shows "2 of 3").
