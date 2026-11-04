@@ -15,6 +15,10 @@ enum Snapshot {
         let photo = args.count > i + 2 ? NSImage(contentsOfFile: args[i + 2]) : nil
         let file = args.count > i + 3 ? NSImage(contentsOfFile: args[i + 3]) : nil
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Demo names only: the real last recipient never shows up in (or gets overwritten by) a snapshot.
+        let scratch = "com.lightdrop.notch.snapshot"
+        UserDefaults.standard.removePersistentDomain(forName: scratch)
+        NotchModel.defaults = UserDefaults(suiteName: scratch) ?? .standard
 
         let sam = Peer(name: "macbook", ip: "100.64.0.2", owner: "Sam Rivera", receiving: true, pic: "p")
         let desk = Peer(name: "studio", ip: "100.64.0.3", owner: "Sam Rivera", receiving: true, pic: "p")
@@ -26,6 +30,8 @@ enum Snapshot {
             ("5-sending", { $0.phase = .sending; $0.progress = 0.62; $0.title = "sunset.jpg"; $0.detail = "Sam" }),
             ("6-sent", { $0.phase = .sent; $0.progress = 1; $0.title = "Delivered to Sam"; $0.detail = "sunset.jpg" }),
             ("7-offline", { $0.phase = .hover; $0.targets = []; $0.lastPic = "p" }),
+            ("7b-not-receiving", { $0.phase = .hover; $0.targets = []; $0.idle = [Peer(name: "macbook", ip: "100.64.0.2",
+                owner: "Sam Rivera", receiving: false, pic: "p")]; $0.lastPic = "p" }),
             ("8-failed", { $0.phase = .failed; $0.title = "Couldn't send"; $0.detail = "Sam isn't online" }),
             ("9-receiving", { $0.incomingShown = true
                 $0.incoming = .init(ip: sam.ip, from: "Sam", pic: "p", name: "sunset.jpg", index: 1, count: 1, part: 0.4) }),

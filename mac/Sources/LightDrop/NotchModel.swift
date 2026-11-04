@@ -18,6 +18,8 @@ final class NotchModel: ObservableObject {
     /// Where the cursor is across the island, -1 (left) … 1 (right); the bottom edge leans to it.
     @Published var pull: CGFloat = 0
     @Published var targets: [Peer] = []
+    /// Other people's computers that are online but not receiving.
+    @Published var idle: [Peer] = []
     @Published var loadingTargets = false
     /// The device pill under the cursor when there are several.
     @Published var hovered: Peer? {
@@ -80,7 +82,7 @@ final class NotchModel: ObservableObject {
     var recipient: String {
         var seen = Set<String>(), people: [String] = []
         for p in targets.map(\.person) where seen.insert(p).inserted { people.append(p) }
-        if people.isEmpty { return UserDefaults.standard.string(forKey: "lastRecipient") ?? "" }
+        if people.isEmpty { return Self.defaults.string(forKey: "lastRecipient") ?? "" }
         return people.joined(separator: " & ")
     }
 
@@ -91,8 +93,23 @@ final class NotchModel: ObservableObject {
 
     /// The last recipient's photo URL, remembered across launches.
     var lastPic: String? {
-        get { UserDefaults.standard.string(forKey: "lastRecipientPic") }
-        set { UserDefaults.standard.set(newValue, forKey: "lastRecipientPic") }
+        get { Self.defaults.string(forKey: "lastRecipientPic") }
+        set { Self.defaults.set(newValue, forKey: "lastRecipientPic") }
+    }
+
+    /// Where the last recipient is remembered; snapshots swap in a scratch store so
+    /// they never show (or overwrite) the real one.
+    static var defaults = UserDefaults.standard
+
+    /// Why there's nowhere to drop: someone's computer is on but not receiving,
+    /// the last recipient is offline, or nobody is there at all.
+    var nobodyReason: (headline: String, detail: String) {
+        // Only the person whose photo the island shows (anyone, when it shows nobody).
+        if let p = idle.first(where: { recipient.isEmpty || $0.person == recipient }) {
+            return ("\(p.person) isn't receiving", "\(p.name) is on, but not receiving")
+        }
+        if recipient.isEmpty { return ("Nobody's receiving", "Nobody is receiving right now") }
+        return ("\(recipient) isn't online", "\(recipient) isn't online")
     }
 
     private static let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -155,13 +172,14 @@ final class NotchModel: ObservableObject {
         lastLoad = Date()
         loadingTargets = true
         Task {
-            let found = (try? await Lightdrop.targets()) ?? []
+            let (found, idle) = (try? await Lightdrop.targets()) ?? ([], [])
             withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
                 targets = found
+                self.idle = idle
                 loadingTargets = false
             }
             if let first = found.first {
-                UserDefaults.standard.set(first.person, forKey: "lastRecipient")
+                Self.defaults.set(first.person, forKey: "lastRecipient")
                 lastPic = first.pic
             }
             for url in Set(found.compactMap(\.pic)) where photos[url] == nil { loadPhoto(url) }
@@ -317,7 +335,7 @@ final class NotchModel: ObservableObject {
     /// Accepts a drop when someone is receiving; `peer` is the pill it landed on.
     func drop(_ urls: [URL], on peer: Peer?) -> Bool {
         guard !urls.isEmpty, !busy, let to = peer ?? (targets.count == 1 ? targets.first : nil) else {
-            if targets.isEmpty { fail(recipient.isEmpty ? "Nobody is receiving right now" : "\(recipient) isn't online") }
+            if targets.isEmpty { fail(nobodyReason.detail) }
             return false
         }
         if peer != nil { hovered = peer }
