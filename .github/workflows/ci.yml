@@ -1,0 +1,59 @@
+# Every push to main and every PR: tests on each OS lightdrop runs on, lint, and
+# the Mac app's build and tests. The Release workflow runs this first too.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # the oldest Go lightdrop promises to build with
+      - run: go vet ./...
+      - name: go test
+        shell: bash
+        # The race detector needs cgo, which the Windows runner's Go lacks by default.
+        run: go test -count=1 $([ "$RUNNER_OS" = Windows ] || echo -race) ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: gofmt
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+      - name: shellcheck
+        run: shellcheck *.sh
+      - name: binaries for every platform
+        run: bash build.sh
+
+  mac-app:
+    name: Mac app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test --package-path mac
+      - name: release build (universal, signed ad hoc)
+        run: bash build-app.sh

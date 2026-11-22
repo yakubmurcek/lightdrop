@@ -1,5 +1,7 @@
 # lightdrop
 
+[![CI](https://github.com/yakubmurcek/lightdrop/actions/workflows/ci.yml/badge.svg)](https://github.com/yakubmurcek/lightdrop/actions/workflows/ci.yml)
+
 AirDrop in the terminal, between your computers and your friends' computers, over Tailscale.
 Files go straight from one computer to the other and land in Downloads. Mac, Linux and Windows.
 
@@ -72,13 +74,20 @@ the Tailscale app's CLI doesn't answer outside a terminal.
 Install puts the binary in `~/.local/bin` (Windows: `%LOCALAPPDATA%\lightdrop`) and adds that
 folder to the PATH (the login shell's startup file; Windows: the user PATH).
 
-## Build and publish
+## Build, test and publish
 
 ```
-bash build.sh        # needs Go: vet, test, binaries for every platform into dist/
-bash build-app.sh    # Mac with Xcode: dist/LightDrop-app.zip
-bash publish.sh      # a GitHub release of dist/ and the installers; install lines fetch the latest
+bash build.sh                        # needs Go: vet, test, binaries for every platform into dist/
+bash build-app.sh                    # Mac with Xcode: dist/LightDrop-app.zip
+swift test --package-path mac        # the Mac app's tests
+bash publish.sh                      # release from main, built on GitHub (needs gh)
 ```
+
+CI (`.github/workflows/ci.yml`) runs on every PR and push to main: the Go tests on macOS,
+Linux and Windows, gofmt, staticcheck, shellcheck, cross-builds, and the Mac app's tests
+and universal build. `publish.sh` starts the Release workflow, which runs CI, builds
+everything on a GitHub Mac and makes a release under a date tag (`v2026.11.03`, then
+`v2026.11.03.2`…). The install lines download from the latest release.
 
 The first install lines pointed at a gist; its `install.sh` and `install.ps1` now just run the
 ones from the latest release, so those lines keep working. In a fork, change `REPO` in
