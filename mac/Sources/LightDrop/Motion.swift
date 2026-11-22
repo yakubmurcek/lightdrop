@@ -85,7 +85,7 @@ struct RGB: Equatable {
     }
 }
 
-/// One glowing edge: five colours going round (a turning angular gradient) and how bright.
+/// One glowing edge: five colours left to right (symmetric, so both sides match) and how bright.
 struct RimPaint: Equatable {
     var colors: [RGB]
     var opacity: Double
@@ -94,8 +94,7 @@ struct RimPaint: Equatable {
     static func solid(_ c: Color, _ opacity: Double) -> RimPaint {
         RimPaint(colors: Array(repeating: RGB(c), count: 5), opacity: opacity)
     }
-    static let rainbow = Palette.glow.map(RGB.init)
-    /// Blue and violet, twice round.
+    /// Blue at the sides, violet across the bottom.
     static let flow: [RGB] = {
         let b = RGB(Palette.blue), v = RGB(Palette.violet), m = b.mixed(with: v, 0.5)
         return [b, m, v, m, b]
@@ -134,12 +133,12 @@ struct RimLayer {
     var settles: Double { max(start + Self.fade, opacity.settles) }
 }
 
-/// Where the island is headed: its size, outline and glow for what's happening now.
+/// Where the island is headed: its size, corners and glow for what's happening now.
 struct Look: Equatable {
     var size: CGSize
-    var shoulder: CGFloat
-    var roundness: CGFloat
-    var bulge: CGFloat
+    /// The outward curve where it meets the menu bar, and its own bottom corners.
+    var top: CGFloat
+    var bottom: CGFloat
     /// Shadow strength, 0 … 1.
     var shade: CGFloat
     /// The full edge, and the edge traced as far as the progress.
@@ -152,8 +151,7 @@ struct Look: Equatable {
 @MainActor
 final class Motion {
     var w = Spring(0), h = Spring(0)
-    var shoulder = Spring(6), roundness = Spring(6, tolerance: 0.005), bulge = Spring(0), shade = Spring(0, tolerance: 0.005)
-    var pull = Spring(0, tolerance: 0.002)
+    var top = Spring(6, tolerance: 0.02), bottom = Spring(14, tolerance: 0.02), shade = Spring(0, tolerance: 0.005)
     var progress = Spring(0, tolerance: 0.001)
     var outline = RimLayer(), trace = RimLayer()
     private(set) var look: Look?
@@ -164,66 +162,63 @@ final class Motion {
 
     /// Every part at rest from here on.
     var settles: Double {
-        [w.settles, h.settles, shoulder.settles, roundness.settles, bulge.settles, shade.settles,
-         pull.settles, progress.settles, outline.settles, trace.settles].max() ?? 0
+        [w.settles, h.settles, top.settles, bottom.settles, shade.settles,
+         progress.settles, outline.settles, trace.settles].max() ?? 0
     }
 
     enum Pace {
-        /// Following the cursor in.
+        /// Following the cursor in: quick, never past it.
         case track
-        /// Opening for a drop or a send: lively, a hint of overshoot.
+        /// Opening for a drop or a send: a hint of overshoot, like the Dynamic Island.
         case open
-        /// A file arriving: calm, never bouncy.
+        /// A file arriving: calm, no overshoot at all.
         case calm
+    }
+
+    /// Opening and closing, as (response, damping). Width, height and corners share one
+    /// spring, so the outline grows as one shape instead of stretching one way first.
+    nonisolated static func spring(_ pace: Pace, growing: Bool) -> (Double, Double) {
+        switch (pace, growing) {
+        case (.track, _): (0.28, 1)
+        case (.open, true): (0.42, 0.82)
+        case (.calm, true): (0.45, 1)
+        case (_, false): (0.42, 1)
+        }
     }
 
     func jump(to look: Look) {
         self.look = look
         w.jump(look.size.width)
         h.jump(look.size.height)
-        shoulder.jump(look.shoulder)
-        roundness.jump(look.roundness)
-        bulge.jump(look.bulge)
+        top.jump(look.top)
+        bottom.jump(look.bottom)
         shade.jump(look.shade)
         outline.jump(look.outline)
         trace.jump(look.trace)
     }
 
-    /// Heads for `look`. Growing uses `pace`; shrinking always settles without passing
-    /// the target, so the island never dips inside the notch on its way closed.
+    /// Heads for `look`. The island grows with `pace`; shrinking always settles without
+    /// passing the target, so it never dips inside the notch on its way closed.
     func retarget(to look: Look, pace: Pace) {
         guard self.look != nil else { return jump(to: look) }
         let t = clock
+        // One decision for the whole shape: opening if its area grows.
+        let growing = look.size.width * look.size.height >= w.value(at: t) * h.value(at: t)
+        let (r, d) = Self.spring(pace, growing: growing)
         self.look = look
-        func go(_ s: inout Spring, _ to: CGFloat, grow: (Double, Double), shrink: (Double, Double)) {
+        func go(_ s: inout Spring, _ to: CGFloat) {
             guard Double(to) != s.target else { return }
-            let (r, d) = Double(to) > s.value(at: t) ? grow : shrink
             s.retarget(Double(to), at: t, response: r, damping: d)
         }
-        switch pace {
-        case .track:
-            go(&w, look.size.width, grow: (0.3, 0.82), shrink: (0.3, 1))
-            go(&h, look.size.height, grow: (0.26, 0.8), shrink: (0.26, 1))
-        case .open:
-            go(&w, look.size.width, grow: (0.52, 0.72), shrink: (0.44, 1))
-            go(&h, look.size.height, grow: (0.44, 0.68), shrink: (0.38, 1))
-        case .calm:
-            go(&w, look.size.width, grow: (0.5, 0.9), shrink: (0.46, 1))
-            go(&h, look.size.height, grow: (0.46, 0.9), shrink: (0.42, 1))
-        }
-        let shape = pace == .track ? (0.28, 1.0) : (0.42, 1.0)
-        go(&shoulder, look.shoulder, grow: shape, shrink: shape)
-        go(&roundness, look.roundness, grow: shape, shrink: shape)
-        go(&bulge, look.bulge, grow: (0.4, 0.75), shrink: (0.36, 1))
-        go(&shade, look.shade, grow: (0.4, 1), shrink: (0.36, 1))
+        go(&w, look.size.width)
+        go(&h, look.size.height)
+        go(&top, look.top)
+        go(&bottom, look.bottom)
+        go(&shade, look.shade)
         outline.retarget(look.outline, at: t)
         trace.retarget(look.trace, at: t)
         // A trace coming into view starts from its own progress, not from where the last one ended.
         if trace.opacity.value(at: t) < 0.03 { progress.jump(progress.target) }
-    }
-
-    func follow(pull to: CGFloat) {
-        pull.retarget(Double(to), at: clock, response: 0.35, damping: 0.7)
     }
 
     func follow(progress to: Double) {

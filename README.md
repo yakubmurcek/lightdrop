@@ -86,7 +86,7 @@ bash build.sh                        # needs Go: vet, test, binaries for every p
 bash build-app.sh                    # Mac with Xcode: dist/LightDrop-app.zip
 swift test --package-path mac        # the Mac app's tests
 swift run --package-path mac LightDrop --snapshot out/ [photo] [file]   # every island state as a PNG
-swift run --package-path mac LightDrop --demo pic.jpg [scene]   # play the motion on its own (quit LightDrop first)
+swift run --package-path mac LightDrop --demo pic.jpg [scene] [photo]   # play the motion on its own (quit LightDrop first; LIGHTDROP_DEMO_STAGE=1 puts a plain desktop behind it for recording)
 bash publish.sh                      # release from main, built on GitHub (needs gh)
 ```
 

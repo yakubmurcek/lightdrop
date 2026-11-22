@@ -7,24 +7,15 @@ import SwiftUI
 final class NotchModel: ObservableObject {
     enum Phase: Equatable { case idle, near, hover, sending, sent, failed }
 
-    @Published var phase: Phase = .idle {
-        didSet { if phase != oldValue { kick(phase == .sent || phase == .failed ? 1 : 0.7) } }
-    }
-    /// The last jiggle: when and how hard (the outline ripples, then settles).
-    @Published var kickedAt = Date.distantPast
-    @Published var kickStrength = 0.0
+    @Published var phase: Phase = .idle
     /// 0 (far) … 1 (at the notch) while a file is dragged nearby.
     @Published var proximity: CGFloat = 0
-    /// Where the cursor is across the island, -1 (left) … 1 (right); the bottom edge leans to it.
-    @Published var pull: CGFloat = 0
     @Published var targets: [Peer] = []
     /// Other people's computers that are online but not receiving.
     @Published var idle: [Peer] = []
     @Published var loadingTargets = false
     /// The device pill under the cursor when there are several.
-    @Published var hovered: Peer? {
-        didSet { if hovered != oldValue, hovered != nil { kick(0.4) } }
-    }
+    @Published var hovered: Peer?
     @Published var progress: Double = 0
     @Published var title = ""
     @Published var detail = ""
@@ -120,11 +111,6 @@ final class NotchModel: ObservableObject {
         return cache.appendingPathComponent(String(name))
     }
 
-    func kick(_ strength: Double) {
-        kickedAt = Date()
-        kickStrength = strength
-    }
-
     var busy: Bool { phase == .sending || phase == .sent || phase == .failed }
 
     // MARK: drag
@@ -138,19 +124,12 @@ final class NotchModel: ObservableObject {
         refreshTargets()
     }
 
-    func dragMoved(proximity p: CGFloat, lean: CGFloat) {
+    func dragMoved(proximity p: CGFloat) {
         guard !busy, phase != .hover else { return }
-        withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.62)) {
+        withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 1)) {
             proximity = p
-            pull = lean
             phase = p > 0 ? .near : .idle
         }
-    }
-
-    /// Cursor position over the open island, -1 … 1.
-    func hoverMoved(_ x: CGFloat) {
-        guard phase == .hover else { return }
-        withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.55)) { pull = x }
     }
 
     func dragEnded() {
@@ -364,10 +343,9 @@ final class NotchModel: ObservableObject {
     }
 
     private func startSending(_ name: String, to: Peer) {
-        withAnimation(.spring(response: 0.5, dampingFraction: 0.66)) {
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
             phase = .sending
             progress = 0
-            pull = 0
             title = name
             detail = to.person
         }
@@ -375,23 +353,29 @@ final class NotchModel: ObservableObject {
 
     static let demoScenes = ["send", "pills", "offline", "retreat", "receive", "batch", "broken"]
 
-    /// `LightDrop --demo <file> [scene]`: plays a scene on its own (no mouse, nothing
+    /// `LightDrop --demo <file> [scene] [photo]`: plays a scene on its own (no mouse, nothing
     /// sent or received, made-up computers), to watch or record the motion. Scenes
-    /// are `demoScenes`; without one, all of them in turn.
-    func playDemo(file: URL, scene: String?) async {
+    /// are `demoScenes`; without one, all of them in turn. `photo` is Sam's picture.
+    func playDemo(file: URL, scene: String?, photo: URL? = nil) async {
         func wait(_ s: Double) async { try? await Task.sleep(nanoseconds: UInt64(s * 1e9)) }
-        let sam = Peer(name: "macbook", ip: "100.64.0.2", owner: "Sam Rivera", receiving: true, pic: lastPic)
-        let studio = Peer(name: "studio", ip: "100.64.0.3", owner: "Sam Rivera", receiving: true, pic: lastPic)
+        // Made-up names and pictures only: the real last recipient never shows up in a recording.
+        let scratch = "com.lightdrop.notch.demo"
+        UserDefaults.standard.removePersistentDomain(forName: scratch)
+        Self.defaults = UserDefaults(suiteName: scratch) ?? .standard
+        let pic = photo.flatMap { NSImage(contentsOf: $0) }.map { photos["demo"] = $0; return "demo" }
+        lastPic = pic
+        let sam = Peer(name: "macbook", ip: "100.64.0.2", owner: "Sam Rivera", receiving: true, pic: pic)
+        let studio = Peer(name: "studio", ip: "100.64.0.3", owner: "Sam Rivera", receiving: true, pic: pic)
         lastLoad = .distantFuture
         known = [sam, studio]
         let name = file.lastPathComponent
 
-        /// The cursor coming in from below at drag speed (the watcher's 60 Hz), leaning a little.
+        /// The cursor coming in from below at drag speed (the watcher's 60 Hz).
         func approach(from: CGFloat = 0, to: CGFloat = 1, seconds: Double = 0.7) async {
             let n = Int(seconds * 60)
             for i in 0...n {
                 let p = from + (to - from) * CGFloat(i) / CGFloat(n)
-                dragMoved(proximity: p, lean: 6 * sin(p * 3))
+                dragMoved(proximity: p)
                 await wait(1.0 / 60)
             }
         }
@@ -400,10 +384,9 @@ final class NotchModel: ObservableObject {
             let n = Int(seconds * 60)
             for i in 0...n {
                 let x = x0 + (x1 - x0) * CGFloat(i) / CGFloat(n)
-                hoverMoved(x)
                 if targets.count > 1 {
                     let peer = targets[x < 0 ? 0 : 1]
-                    if peer != hovered { withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { hovered = peer } }
+                    if peer != hovered { withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { hovered = peer } }
                 }
                 await wait(1.0 / 60)
             }
@@ -482,7 +465,7 @@ final class NotchModel: ObservableObject {
     private func succeed(to: Peer, name: String) {
         Haptics.success()
         NSSound(named: "Pop")?.play()
-        withAnimation(.spring(response: 0.5, dampingFraction: 0.62)) {
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
             progress = 1
             phase = .sent
             title = "Delivered to \(to.person)"
@@ -493,11 +476,10 @@ final class NotchModel: ObservableObject {
 
     private func fail(_ message: String) {
         Haptics.tap()
-        withAnimation(.spring(response: 0.42, dampingFraction: 0.62)) {
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.86)) {
             phase = .failed
             title = "Couldn't send"
             detail = message
-            pull = 0
         }
         withAnimation(.linear(duration: 0.5)) { shakes += 1 }
         scheduleCollapse(after: 3)
@@ -514,10 +496,9 @@ final class NotchModel: ObservableObject {
 
     private func collapse(force: Bool = false) {
         guard force || !busy else { return }
-        withAnimation(.spring(response: 0.5, dampingFraction: 0.74)) {
+        withAnimation(.spring(response: 0.45, dampingFraction: 1)) {
             phase = .idle
             proximity = 0
-            pull = 0
             hovered = nil
         }
     }

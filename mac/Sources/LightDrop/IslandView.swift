@@ -1,69 +1,89 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The island outline: flush with the top of the screen, small outward-curving
-/// "shoulders" where it meets the menu bar, and a soft, rounded body (the lower
-/// half of a superellipse: notch-like when closed, nearly a drop when open). The
-/// bottom edge ripples with `wobble` and sags toward the cursor with `bulge`.
+/// The island outline, one shape family for every state (the notch's own, as Apple
+/// and boring.notch draw it): flush with the top of the screen, a small outward
+/// curve where it meets the menu bar, straight sides, rounded bottom corners and a
+/// flat bottom. Always symmetric.
 ///
 /// Not animatable on purpose: `Motion` moves it, frame by frame, so the body, the
 /// rim and the mask over the content always draw the very same outline.
 struct NotchShape: Shape {
-    var shoulder: CGFloat
-    /// Superellipse exponent: ~6 is the boxy notch, ~2.6 a soft drop.
-    var roundness: CGFloat
-    var bulge: CGFloat = 0
-    /// Where the sag is, -1 (left) … 1 (right).
-    var pull: CGFloat = 0
-    /// Ripple height (pt) and its clock.
-    var wobble: CGFloat = 0
-    var time: Double = 0
+    /// Radius of the outward curve at the menu bar.
+    var top: CGFloat
+    /// Radius of the bottom corners.
+    var bottom: CGFloat
 
-    static let steps = 120
+    /// Ratio of a cubic's handle to its radius for a quarter circle.
+    private static let k: CGFloat = 0.5523
+
+    /// The radii that fit `r`: the bottom corners never take more than the sides have,
+    /// so a short island is a rounded bar, never a half-circle blob.
+    func radii(in r: CGRect) -> (top: CGFloat, bottom: CGFloat) {
+        let t = max(0, min(top, r.width / 4, r.height / 2))
+        let b = max(0, min(bottom, r.height - t, (r.width - 2 * t) / 2))
+        return (t, b)
+    }
 
     func path(in r: CGRect) -> Path {
-        let pts = points(in: r)
-        let s = min(shoulder, r.width / 4, r.height / 3)
         var p = Path()
         p.move(to: CGPoint(x: r.minX, y: r.minY))
-        p.addQuadCurve(to: pts[0], control: CGPoint(x: r.minX + s, y: r.minY))
-        for pt in pts.dropFirst() { p.addLine(to: pt) }
-        p.addQuadCurve(to: CGPoint(x: r.maxX, y: r.minY), control: CGPoint(x: r.maxX - s, y: r.minY))
+        addHalf(.left, to: &p, in: r, down: true)
+        addHalf(.right, to: &p, in: r, down: false)
         p.closeSubpath()
         return p
     }
 
-    /// The body's edge from the left shoulder round to the right one. The superellipse
-    /// is walked by angle (its polar form), which spreads the points evenly: walking
-    /// it by the usual parameter leaves the flat bottom a few long straight segments,
-    /// which show as a kink once the edge ripples.
-    func points(in r: CGRect) -> [CGPoint] {
-        let s = min(shoulder, r.width / 4, r.height / 3)
-        let a = (r.width - 2 * s) / 2, cx = r.midX, h = max(r.height, 1)
-        let n = Double(max(2.05, roundness))
-        let px = cx + max(-1, min(1, pull)) * a * 0.55
-        func radius(_ th: Double) -> Double { pow(pow(abs(cos(th)), n) + pow(abs(sin(th)), n), -1 / n) }
-        func point(_ th: Double) -> CGPoint {
-            let rr = radius(th)
-            let ux = -rr * cos(th)          // -1 … 1 across
-            let depth = rr * sin(th)        // 0 at the top, 1 at the bottom
-            var x = cx + a * ux
-            var y = h * depth
-            let u = (ux + 1) / 2
-            let ripple = sin(u * .pi * 3 + time * 3.3) + 0.55 * sin(u * .pi * 5.4 - time * 4.6)
-            y += wobble * depth * depth * ripple
-            x += wobble * 0.35 * depth * sin(time * 2.4 + u * 4)
-            y += bulge * depth * exp(-pow((x - px) / (a * 0.38), 2))
-            return CGPoint(x: x, y: r.minY + y)
+    enum Side { case left, right }
+
+    /// The visible edge (no top line), as one run from the left shoulder round to the
+    /// right one; or one side of it, from its shoulder down to the bottom centre (the
+    /// progress traces both sides at once, so it stays symmetric).
+    func edge(in r: CGRect, side: Side? = nil) -> Path {
+        var p = Path()
+        switch side {
+        case nil:
+            p.move(to: CGPoint(x: r.minX, y: r.minY))
+            addHalf(.left, to: &p, in: r, down: true)
+            addHalf(.right, to: &p, in: r, down: false)
+        case let side?:
+            p.move(to: CGPoint(x: side == .left ? r.minX : r.maxX, y: r.minY))
+            addHalf(side, to: &p, in: r, down: true)
         }
-        // Where the shoulder hands over to the body: at depth s / h.
-        var lo = 0.0, hi = Double.pi / 2
-        for _ in 0..<24 {
-            let mid = (lo + hi) / 2
-            if radius(mid) * sin(mid) < Double(s / h) { lo = mid } else { hi = mid }
-        }
-        return (0...Self.steps).map { point(lo + (.pi - 2 * lo) * Double($0) / Double(Self.steps)) }
+        return p
     }
+
+    /// One side, from the top corner of the frame to the bottom centre (`down`), or back up.
+    private func addHalf(_ side: Side, to p: inout Path, in r: CGRect, down: Bool) {
+        let (t, b) = radii(in: r)
+        let k = Self.k
+        // Mirror x for the right side.
+        let m: (CGFloat) -> CGFloat = side == .left ? { r.minX + $0 } : { r.maxX - $0 }
+        let y0 = r.minY, y1 = r.maxY
+        // The points, top to bottom: shoulder, side, corner, to the middle of the bottom.
+        let shoulderEnd = CGPoint(x: m(t), y: y0 + t)
+        let cornerStart = CGPoint(x: m(t), y: y1 - b)
+        let cornerEnd = CGPoint(x: m(t + b), y: y1)
+        let middle = CGPoint(x: r.midX, y: y1)
+        if down {
+            p.addCurve(to: shoulderEnd, control1: CGPoint(x: m(t * k), y: y0), control2: CGPoint(x: m(t), y: y0 + t * (1 - k)))
+            p.addLine(to: cornerStart)
+            p.addCurve(to: cornerEnd, control1: CGPoint(x: m(t), y: y1 - b * (1 - k)), control2: CGPoint(x: m(t + b * (1 - k)), y: y1))
+            p.addLine(to: middle)
+        } else {
+            p.addLine(to: cornerEnd)
+            p.addCurve(to: cornerStart, control1: CGPoint(x: m(t + b * (1 - k)), y: y1), control2: CGPoint(x: m(t), y: y1 - b * (1 - k)))
+            p.addLine(to: shoulderEnd)
+            p.addCurve(to: CGPoint(x: m(0), y: y0), control1: CGPoint(x: m(t), y: y0 + t * (1 - k)), control2: CGPoint(x: m(t * k), y: y0))
+        }
+    }
+}
+
+/// One side of the island's edge, for the progress trace.
+struct NotchEdge: Shape {
+    let shape: NotchShape
+    let side: NotchShape.Side?
+    func path(in r: CGRect) -> Path { shape.edge(in: r, side: side) }
 }
 
 extension AnyTransition {
@@ -110,7 +130,6 @@ struct IslandDrop: DropDelegate {
     }
 
     private func track(_ info: DropInfo) {
-        model.hoverMoved((info.location.x - width / 2) / (width / 2))
         let n = model.targets.count
         guard n > 1 else { return }
         let total = CGFloat(n) * DevicePill.width + CGFloat(n - 1) * DevicePill.spacing
@@ -118,7 +137,7 @@ struct IslandDrop: DropDelegate {
         let peer = (0..<n).contains(i) ? model.targets[i] : nil
         if peer != model.hovered {
             if peer != nil { Haptics.tap() }
-            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { model.hovered = peer }
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { model.hovered = peer }
         }
     }
 }
@@ -130,15 +149,13 @@ enum Palette {
     static let amber = Color(red: 1.0, green: 0.72, blue: 0.36)
     static let green = Color(red: 0.32, green: 0.86, blue: 0.52)
     static let red = Color(red: 1.0, green: 0.42, blue: 0.40)
-    static let glow: [Color] = [blue, violet, pink, amber, blue]
 }
 
 struct IslandView: View {
     @ObservedObject var model: NotchModel
     let urls: () -> [URL]
     @State private var targeted = false
-    /// The drawn outline, per frame: width and height chase `size` on different
-    /// springs, so the island squashes and stretches like jelly.
+    /// The drawn outline, per frame: size and corners chase the look on one spring.
     @State private var motion = Motion()
     /// Bumped to look again at whether everything has come to rest.
     @State private var wake = 0
@@ -170,67 +187,42 @@ struct IslandView: View {
         case .hover:
             if model.targets.count > 1 {
                 let n = CGFloat(model.targets.count)
-                return CGSize(width: max(400, n * (DevicePill.width + DevicePill.spacing) + 62), height: notch.height + 126)
+                return CGSize(width: max(Self.open, n * (DevicePill.width + DevicePill.spacing) + 62), height: notch.height + 126)
             }
-            return CGSize(width: 430, height: notch.height + 132)
+            return CGSize(width: Self.open, height: notch.height + 122)
         case .sending, .sent, .failed:
-            return CGSize(width: 410, height: notch.height + 96)
+            return CGSize(width: Self.open, height: notch.height + 96)
         }
     }
 
+    /// The open island's width: dropping, sending and the result share it, so only the height changes between them.
+    static let open: CGFloat = 420
+    /// Corner radii, closed (the notch's own) and open. Every state uses one of the two,
+    /// or, while a file comes near, the way between them.
+    static let closedCorners: (top: CGFloat, bottom: CGFloat) = (6, 14)
+    static let openCorners: (top: CGFloat, bottom: CGFloat) = (14, 24)
+
+    /// 0 closed … 1 open.
     private var expanded: CGFloat {
         switch model.phase {
-        case .idle: arrival?.state == .done ? 0.6 : 0
+        case .idle: arrival?.state == .done ? 1 : 0
         case .near: model.proximity
         default: 1
         }
     }
 
-    private var bulge: CGFloat {
-        switch model.phase {
-        case .near: 6 * model.proximity * model.proximity
-        case .hover: 5
-        default: 0
-        }
-    }
-
-    private var roundness: CGFloat {
-        switch model.phase {
-        case .idle: arrival?.state == .done ? 3.4 : 6
-        case .near: 6 - 3 * model.proximity
-        case .hover: 2.8
-        case .sending, .sent, .failed: 3.4
-        }
-    }
-
-    /// Resting ripple per phase; a kick (any change) adds a jiggle that dies away.
-    private func wobble(_ t: Double) -> CGFloat {
-        let base: CGFloat = switch model.phase {
-        case .idle: 0
-        case .near: 0.9 * model.proximity
-        case .hover: 1.6
-        case .sending: 1.0
-        case .sent, .failed: 0.5
-        }
-        return base + kick(t) * 4
-    }
-
-    /// 1 right after a kick, fading to 0 over about a second.
-    private func kick(_ t: Double) -> CGFloat {
-        CGFloat(model.kickStrength * exp(-max(0, t - model.kickedAt.timeIntervalSinceReferenceDate) * 3.4))
-    }
-
     private var look: Look {
-        Look(size: size, shoulder: 6 + 9 * expanded, roundness: roundness, bulge: bulge, shade: expanded,
-             outline: outlinePaint, trace: tracePaint)
+        let c = Self.closedCorners, o = Self.openCorners, e = expanded
+        return Look(size: size, top: c.top + (o.top - c.top) * e, bottom: c.bottom + (o.bottom - c.bottom) * e,
+                    shade: e, outline: outlinePaint, trace: tracePaint)
     }
 
-    /// The edge as a whole: a slowly turning rainbow while a file hovers, a green or
-    /// red glow after, a faint line while a file comes near.
+    /// The edge as a whole: blue and violet while a file hovers, a green or red glow
+    /// after, a faint line while a file comes near.
     private var outlinePaint: RimPaint {
         switch model.phase {
         case .near: .solid(.white, 0.14 * model.proximity)
-        case .hover: RimPaint(colors: RimPaint.rainbow, opacity: 0.95)
+        case .hover: RimPaint(colors: RimPaint.flow, opacity: 0.9)
         case .sent: .solid(Palette.green, 0.85)
         case .failed: .solid(Palette.red, 0.8)
         case .sending: .off
@@ -258,7 +250,7 @@ struct IslandView: View {
     /// How the island moves to its next look.
     private var pace: Motion.Pace {
         if model.phase == .near { return .track }
-        // Receiving opens and closes calmly: no jelly while someone's working.
+        // Receiving opens and closes calmly: nothing bounces while someone's working.
         if model.phase == .idle && model.incoming != nil { return .calm }
         return .open
     }
@@ -269,33 +261,32 @@ struct IslandView: View {
         if Snapshot.active { return true }
         let now = Date().timeIntervalSinceReferenceDate
         return model.phase == .idle && motion.look == look && now >= motion.settles
-            && now - model.kickedAt.timeIntervalSinceReferenceDate > 1.5
     }
 
     var body: some View {
         let look = self.look
-        VStack(spacing: 0) {
+        ZStack(alignment: .top) {
             TimelineView(.animation(paused: resting(look))) { tl in
-                let now = Snapshot.active ? model.kickedAt.addingTimeInterval(5) : tl.date
+                let now = Snapshot.active ? Date(timeIntervalSinceReferenceDate: 0) : tl.date
                 island(look, at: now.timeIntervalSinceReferenceDate)
             }
-            // Laid out at the size it's headed for (the drawing may run past it while it
-            // moves), which is also where a drop counts.
-            .frame(width: look.size.width, height: look.size.height, alignment: .top)
+            // Drawn in a frame that never changes size, centred: a frame that follows the
+            // look would be moved by SwiftUI's own animation while the outline is drawn at
+            // the springs' size, and the island would slide sideways as it opens and closes.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .modifier(Shake(travel: CGFloat(model.shakes)))
             .opacity(model.hasNotch || model.phase != .idle || model.incomingShown ? 1 : 0)
-            .contentShape(Rectangle())
-            .modifier(DropArea(active: !Snapshot.active,
-                               delegate: IslandDrop(model: model, width: look.size.width, urls: urls, targeted: $targeted)))
-            Spacer(minLength: 0)
+            .allowsHitTesting(false)
+            // Where a drop counts: the size the island is headed for.
+            Color.clear
+                .frame(width: look.size.width, height: look.size.height)
+                .contentShape(Rectangle())
+                .modifier(DropArea(active: !Snapshot.active,
+                                   delegate: IslandDrop(model: model, width: look.size.width, urls: urls, targeted: $targeted)))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onChange(of: look) { new in
             motion.retarget(to: new, pace: pace)
-            wake += 1
-        }
-        .onChange(of: model.pull) { new in
-            motion.follow(pull: new)
             wake += 1
         }
         .onChange(of: traced) { new in
@@ -305,7 +296,7 @@ struct IslandView: View {
         // Once it has all come to rest, look again so the timeline can stop.
         .task(id: wake) {
             let now = Date().timeIntervalSinceReferenceDate
-            let quiet = max(motion.settles, model.kickedAt.timeIntervalSinceReferenceDate + 1.5)
+            let quiet = motion.settles
             guard quiet > now else { return }
             try? await Task.sleep(nanoseconds: UInt64((quiet - now + 0.05) * 1e9))
             if !Task.isCancelled { wake += 1 }
@@ -320,27 +311,21 @@ struct IslandView: View {
             motion.progress.jump(traced)
         }
         motion.lastFrame = max(motion.lastFrame, t)
-        let k = kick(t)
         let w = max(idle.width, motion.w.value(at: t)), h = max(idle.height, motion.h.value(at: t))
-        let shape = NotchShape(shoulder: motion.shoulder.value(at: t), roundness: motion.roundness.value(at: t),
-                               bulge: motion.bulge.value(at: t), pull: motion.pull.value(at: t),
-                               wobble: wobble(t), time: t)
+        let shape = NotchShape(top: motion.top.value(at: t), bottom: motion.bottom.value(at: t))
         return ZStack(alignment: .top) {
             Backdrop(shape: shape, shade: motion.shade.value(at: t), outline: motion.outline.paint(at: t),
-                     trace: motion.trace.paint(at: t), traced: motion.progress.value(at: t),
-                     angle: .degrees(t * 70))
+                     trace: motion.trace.paint(at: t), traced: motion.progress.value(at: t))
                 .frame(width: w, height: h)
             // One container, so what follows applies once: on a bare conditional SwiftUI gives
             // the outgoing content its own copy of the mask, frozen at the old outline.
             ZStack(alignment: .top) { content }
                 .padding(.top, compact ? 0 : notch.height + 6)
-                // Round sides: keep content away from where the outline curves in.
+                // Clear of the shoulders and the bottom corners.
                 .padding(.horizontal, sideInset)
                 .frame(width: look.size.width, height: look.size.height, alignment: .top)
                 // The content animates only on its own changes (below the reset further down).
                 .animation(.spring(response: 0.42, dampingFraction: 0.82), value: scene)
-                // Contents bob with the jiggle, a beat behind the outline.
-                .offset(y: 1.5 * k * sin(t * 13 + 1))
                 .mask(alignment: .top) { shape.frame(width: w, height: h) }
                 // The mask is this frame's outline. Changed inside an animation, SwiftUI would
                 // cross-fade it from the last one, and the old outline would show content
@@ -365,10 +350,9 @@ struct IslandView: View {
 
     private var sideInset: CGFloat {
         switch model.phase {
-        case .idle: compact ? 6 : 40
         case .near: 24
-        case .hover: model.targets.count < 2 ? 58 : 46
-        default: 46
+        // The open shoulder plus the same margin everywhere.
+        default: compact ? 6 : Self.openCorners.top + 22
         }
     }
 
@@ -390,8 +374,8 @@ struct IslandView: View {
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.92))
             }
-            // Centred in the part below the notch (its sag included), however far it has grown.
-            .frame(height: max(0, size.height + bulge - notch.height - 12))
+            // Centred in the part below the notch, however far it has grown.
+            .frame(height: max(0, size.height - notch.height - 12))
             .opacity(Double(max(0, model.proximity - 0.35) / 0.65))
             .scaleEffect(0.8 + 0.2 * model.proximity)
             .blur(radius: 4 * (1 - model.proximity))
@@ -481,7 +465,7 @@ struct IslandView: View {
             }
             .frame(width: 54, height: 54)
             // The badge pops in with a little bounce.
-            .animation(.spring(response: 0.4, dampingFraction: 0.55), value: model.phase)
+            .animation(.spring(response: 0.4, dampingFraction: 0.8), value: model.phase)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.phase == .sending ? "Sending to \(model.detail)" : model.title)
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
@@ -578,7 +562,6 @@ struct Backdrop: View {
     let trace: RimPaint
     /// How far round `trace` goes, 0 … 1.
     let traced: Double
-    let angle: Angle
 
     var body: some View {
         GeometryReader { geo in
@@ -586,11 +569,15 @@ struct Backdrop: View {
                 shape.fill(Color.black)
                     .shadow(color: .black.opacity(0.5 * shade), radius: 26 * shade, y: 10 * shade)
                 ZStack {
-                    if outline.opacity > 0.004 { glow(shape, outline) }
-                    if trace.opacity > 0.004 && traced > 0.002 { glow(shape.trim(from: 0, to: traced), trace) }
+                    if outline.opacity > 0.004 { glow(NotchEdge(shape: shape, side: nil), outline) }
+                    // The progress runs down both sides at once and meets at the bottom centre.
+                    if trace.opacity > 0.004 && traced > 0.002 {
+                        glow(NotchEdge(shape: shape, side: .left).trim(from: 0, to: traced), trace)
+                        glow(NotchEdge(shape: shape, side: .right).trim(from: 0, to: traced), trace)
+                    }
                 }
                 // Only the sides and bottom glow; the top merges with the menu bar. The mask
-                // reaches past the frame, so the blur and the sag below it aren't cut off.
+                // reaches past the frame, so the blur below it isn't cut off.
                 .mask(alignment: .top) {
                     VStack(spacing: 0) {
                         LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
@@ -607,7 +594,8 @@ struct Backdrop: View {
     }
 
     private func glow<S: Shape>(_ edge: S, _ paint: RimPaint) -> some View {
-        let style = AngularGradient(colors: paint.colors.map(\.color), center: .center, angle: angle)
+        // Left to right, and every paint is symmetric, so both sides of the island match.
+        let style = LinearGradient(colors: paint.colors.map(\.color), startPoint: .leading, endPoint: .trailing)
         return ZStack {
             edge.stroke(style, style: StrokeStyle(lineWidth: 7, lineCap: .round)).blur(radius: 9).opacity(paint.opacity * 0.55)
             edge.stroke(style, style: StrokeStyle(lineWidth: 1.5, lineCap: .round)).opacity(paint.opacity)
@@ -625,7 +613,7 @@ struct DropArea: ViewModifier {
     }
 }
 
-/// A tilted card with the dragged file's preview; a badge counts several.
+/// A card with the dragged file's preview; a badge counts several.
 struct FileCard: View {
     let image: NSImage?
     let count: Int
@@ -649,8 +637,8 @@ struct FileCard: View {
             .frame(width: s, height: s)
             .clipShape(RoundedRectangle(cornerRadius: small ? 5 : 11, style: .continuous))
             .shadow(color: .black.opacity(0.6), radius: 6, y: 3)
-            .rotationEffect(.degrees(small ? 0 : (lifted ? -9 : -4)))
-            .offset(y: small ? 0 : (lifted ? -2 : 1))
+            // Straight, floating up and down a little while it's held over the island.
+            .offset(y: small ? 0 : (lifted ? -1.5 : 1.5))
             if count > 1 {
                 Text("\(count)")
                     .font(.system(size: 10, weight: .bold, design: .rounded))
@@ -663,7 +651,7 @@ struct FileCard: View {
         }
         .onAppear {
             guard !small, !still else { return }
-            withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) { lifted = true }
+            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) { lifted = true }
         }
     }
 }
@@ -756,7 +744,7 @@ struct Avatar: View {
         .saturation(dimmed ? 0 : 1)
         .opacity(dimmed ? 0.5 : 1)
         .scaleEffect(glow ? 1.08 : 1)
-        .animation(.spring(response: 0.35, dampingFraction: 0.5), value: glow)
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: glow)
         // The photo and the name can arrive after the person is already on screen.
         .animation(.easeOut(duration: 0.25), value: photo)
         .animation(.easeOut(duration: 0.25), value: name)
@@ -799,7 +787,7 @@ struct DevicePill: View {
                     .stroke(hovered ? Palette.blue.opacity(0.9) : .white.opacity(0.06), lineWidth: 1))
         )
         .scaleEffect(hovered ? 1.07 : 1)
-        .animation(.spring(response: 0.3, dampingFraction: 0.55), value: hovered)
+        .animation(.spring(response: 0.3, dampingFraction: 0.86), value: hovered)
     }
 
     private var icon: String {

@@ -55,13 +55,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let i = args.firstIndex(of: "--demo"), i + 1 < args.count, let model {
             panel?.ignoresMouseEvents = true
             let scene = i + 2 < args.count ? args[i + 2] : nil
-            Task { await model.playDemo(file: URL(fileURLWithPath: args[i + 1]), scene: scene) }
+            let photo = i + 3 < args.count ? URL(fileURLWithPath: args[i + 3]) : nil
+            Task { await model.playDemo(file: URL(fileURLWithPath: args[i + 1]), scene: scene, photo: photo) }
         }
     }
 
     /// The screen with the notch, else the main one.
     private var screen: NSScreen? {
         NSScreen.screens.first { $0.safeAreaInsets.top > 0 } ?? NSScreen.main
+    }
+
+    /// The island's host. It never sizes the panel: the island's size changes with every
+    /// look, and a host that passes that on to the window shifts everything while it animates.
+    private static func host<V: View>(_ view: V) -> NSView {
+        let h = NSHostingView(rootView: view)
+        h.sizingOptions = []
+        return h
     }
 
     private func layout() {
@@ -80,13 +89,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.recent = Array(self?.recent.prefix(5) ?? [])
         }
         self.model = model
-        let view = IslandView(model: model) { [weak self] in self?.watcher.draggedURLs ?? [] }
+        let island = IslandView(model: model) { [weak self] in self?.watcher.draggedURLs ?? [] }
+        // LIGHTDROP_DEMO_STAGE=1 with --demo: a plain desktop behind the island, to record it.
+        let staged = CommandLine.arguments.contains("--demo") && ProcessInfo.processInfo.environment["LIGHTDROP_DEMO_STAGE"] != nil
+        let view: NSView = staged ? Self.host(Stage(menuBar: max(notch.height, 24)) { island }) : Self.host(island)
         if let panel {
             panel.setFrame(frame, display: true)
-            panel.contentView = NSHostingView(rootView: view)
+            panel.contentView = view
         } else {
             let p = NotchPanel(frame: frame)
-            p.contentView = NSHostingView(rootView: view)
+            p.contentView = view
             p.orderFrontRegardless()
             panel = p
         }
@@ -99,7 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let dx = point.x - top.x, dy = point.y - top.y
         let d = hypot(dx * 0.7, dy)
         let p = max(0, min(1, 1 - (d - 50) / 260))
-        model.dragMoved(proximity: p, lean: max(-12, min(12, dx * 0.05)))
+        model.dragMoved(proximity: p)
     }
 
     private func addStatusItem() {

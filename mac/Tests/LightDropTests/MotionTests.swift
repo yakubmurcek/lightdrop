@@ -36,38 +36,65 @@ final class SpringTests: XCTestCase {
         for i in 0..<100 { XCTAssertEqual(s.value(at: s.settles + Double(i) / 50), 300, accuracy: 0.05) }
     }
 
-    /// The island opens with a hint of overshoot, not a bounce.
+    /// The island opens with a hint of overshoot, not a bounce; it closes without any.
     func testOpeningOvershootsOnlyALittle() {
+        let (r, d) = Motion.spring(.open, growing: true)
         var s = Spring(32)
-        s.retarget(164, at: 0, response: 0.44, damping: 0.68)
+        s.retarget(154, at: 0, response: r, damping: d)
         let peak = (0...300).map { s.value(at: Double($0) / 100) }.max()!
-        XCTAssertGreaterThan(peak, 164)
-        XCTAssertLessThan((peak - 164) / (164 - 32), 0.08)
+        XCTAssertGreaterThan(peak, 154)
+        XCTAssertLessThan((peak - 154) / (154 - 32), 0.03)
+        for pace in [Motion.Pace.track, .open, .calm] {
+            XCTAssertEqual(Motion.spring(pace, growing: false).1, 1, "closing never passes the notch")
+        }
+        XCTAssertEqual(Motion.spring(.calm, growing: true).1, 1, "a file arriving never bounces")
     }
 }
 
 final class NotchShapeTests: XCTestCase {
-    /// Every look the island takes, through its ripple: the edge is a smooth run of short
-    /// segments (a long straight one shows as a kink once it ripples) within its width.
-    func testEdgeIsSmoothAndInside() {
-        let looks: [(CGSize, CGFloat, CGFloat)] = [
-            (CGSize(width: 197, height: 32), 6, 6),      // resting
-            (CGSize(width: 251, height: 32), 6, 6),      // a file arriving
-            (CGSize(width: 430, height: 164), 2.8, 15),  // a file over it
-            (CGSize(width: 410, height: 128), 3.4, 15),  // sending
-            (CGSize(width: 360, height: 90), 3.4, 11),   // received
-        ]
-        for (size, roundness, shoulder) in looks {
+    static let looks: [(CGSize, CGFloat, CGFloat)] = [
+        (CGSize(width: 197, height: 32), 6, 14),     // resting
+        (CGSize(width: 251, height: 32), 6, 14),     // a file arriving
+        (CGSize(width: 260, height: 50), 9, 17),     // a file coming near
+        (CGSize(width: 420, height: 154), 14, 24),   // a file over it
+        (CGSize(width: 420, height: 128), 14, 24),   // sending
+        (CGSize(width: 360, height: 90), 14, 24),    // received
+        (CGSize(width: 200, height: 20), 14, 24),    // mid-way, shorter than its corners
+    ]
+
+    /// The two sides are mirror images, in every look.
+    func testSymmetric() {
+        for (size, top, bottom) in Self.looks {
             let rect = CGRect(origin: .zero, size: size)
-            for t in stride(from: 0.0, to: 2, by: 0.2) {
-                let shape = NotchShape(shoulder: shoulder, roundness: roundness, bulge: 5, pull: 0.4, wobble: 4, time: t)
-                let pts = shape.points(in: rect)
-                for (a, b) in zip(pts, pts.dropFirst()) {
-                    XCTAssertLessThan(hypot(b.x - a.x, b.y - a.y), 9, "\(size) n=\(roundness): a long straight run")
-                }
-                XCTAssertTrue(pts.allSatisfy { $0.x >= rect.minX - 2 && $0.x <= rect.maxX + 2 }, "\(size): out of bounds")
-                XCTAssertEqual(pts.first!.y, shoulder, accuracy: 2, "the body starts where the shoulder ends")
+            let shape = NotchShape(top: top, bottom: bottom)
+            let left = shape.edge(in: rect, side: .left), right = shape.edge(in: rect, side: .right)
+            for i in 1...40 {
+                let f = Double(i) / 40
+                let a = left.trimmedPath(from: 0, to: f).currentPoint!, b = right.trimmedPath(from: 0, to: f).currentPoint!
+                XCTAssertEqual(a.x, size.width - b.x, accuracy: 0.01, "\(size)")
+                XCTAssertEqual(a.y, b.y, accuracy: 0.01, "\(size)")
             }
+            // Both halves end at the bottom centre.
+            XCTAssertEqual(left.currentPoint!.x, size.width / 2, accuracy: 0.01)
+            XCTAssertEqual(left.currentPoint!.y, size.height, accuracy: 0.01)
+        }
+    }
+
+    /// Inside its frame, flat on top and bottom, and the corners never outgrow the sides
+    /// (a short island is a rounded bar, not a half-circle blob).
+    func testInsideAndCornersFit() {
+        for (size, top, bottom) in Self.looks {
+            let rect = CGRect(origin: .zero, size: size)
+            let shape = NotchShape(top: top, bottom: bottom)
+            let box = shape.path(in: rect).boundingRect
+            XCTAssertEqual(box.minX, 0, accuracy: 0.01)
+            XCTAssertEqual(box.maxX, size.width, accuracy: 0.01)
+            XCTAssertEqual(box.minY, 0, accuracy: 0.01)
+            XCTAssertEqual(box.maxY, size.height, accuracy: 0.01)
+            let (t, b) = shape.radii(in: rect)
+            XCTAssertLessThanOrEqual(t + b, size.height + 0.01)
+            XCTAssertLessThanOrEqual(2 * (t + b), size.width + 0.01)
+            XCTAssertEqual(t, min(top, size.height / 2), accuracy: 0.01)
         }
     }
 }

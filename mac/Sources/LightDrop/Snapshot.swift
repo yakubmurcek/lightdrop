@@ -23,10 +23,10 @@ enum Snapshot {
         let sam = Peer(name: "macbook", ip: "100.64.0.2", owner: "Sam Rivera", receiving: true, pic: "p")
         let desk = Peer(name: "studio", ip: "100.64.0.3", owner: "Sam Rivera", receiving: true, pic: "p")
         let states: [(String, (NotchModel) -> Void)] = [
-            ("1-near-far", { $0.phase = .near; $0.proximity = 0.45; $0.pull = -0.3 }),
-            ("2-near-close", { $0.phase = .near; $0.proximity = 0.95; $0.pull = 0.4 }),
-            ("3-hover", { $0.phase = .hover; $0.pull = -0.5 }),
-            ("4-hover-two-computers", { $0.phase = .hover; $0.targets = [sam, desk]; $0.hovered = desk; $0.pull = 0.4 }),
+            ("1-near-far", { $0.phase = .near; $0.proximity = 0.45 }),
+            ("2-near-close", { $0.phase = .near; $0.proximity = 0.95 }),
+            ("3-hover", { $0.phase = .hover }),
+            ("4-hover-two-computers", { $0.phase = .hover; $0.targets = [sam, desk]; $0.hovered = desk }),
             ("5-sending", { $0.phase = .sending; $0.progress = 0.62; $0.title = "sunset.jpg"; $0.detail = "Sam" }),
             ("6-sent", { $0.phase = .sent; $0.progress = 1; $0.title = "Delivered to Sam"; $0.detail = "sunset.jpg" }),
             ("7-offline", { $0.phase = .hover; $0.targets = []; $0.lastPic = "p" }),
@@ -55,13 +55,8 @@ enum Snapshot {
             m.fileName = "sunset.jpg"
             if let photo { m.photos["p"] = photo }
             apply(m)
-            let view = ZStack(alignment: .top) {
-                LinearGradient(colors: [Color(red: 0.16, green: 0.15, blue: 0.30), Color(red: 0.32, green: 0.28, blue: 0.52)],
-                               startPoint: .top, endPoint: .bottom)
-                Rectangle().fill(Color(white: 0.13)).frame(height: notch ? 32 : 24)
-                IslandView(model: m, urls: { [] })
-            }
-            .frame(width: 560, height: 220)
+            let view = Stage(menuBar: notch ? 32 : 24) { IslandView(model: m, urls: { [] }) }
+                .frame(width: 560, height: 220)
             let r = ImageRenderer(content: view)
             r.scale = 2
             if let cg = r.cgImage {
@@ -70,5 +65,21 @@ enum Snapshot {
             }
         }
         exit(0)
+    }
+}
+
+/// A plain desktop and menu bar behind the island, for snapshots and staged demo
+/// recordings (nothing of the real screen shows).
+struct Stage<Content: View>: View {
+    let menuBar: CGFloat
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            LinearGradient(colors: [Color(red: 0.16, green: 0.15, blue: 0.30), Color(red: 0.32, green: 0.28, blue: 0.52)],
+                           startPoint: .top, endPoint: .bottom)
+            Rectangle().fill(Color(white: 0.13)).frame(height: menuBar)
+            content
+        }
     }
 }
