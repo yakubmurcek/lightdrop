@@ -383,3 +383,31 @@ func (r rewritePort) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.URL.Host = r.addr
 	return http.DefaultTransport.RoundTrip(req)
 }
+
+func TestNotReceivingNamesPeopleOnly(t *testing.T) {
+	if got := notReceiving(nil); got != "" {
+		t.Fatalf("nobody idle: %q", got)
+	}
+	got := notReceiving([]peer{
+		{Name: "nas", IP: "100.64.0.9"}, // a server: most never receive, not worth naming
+		{Name: "ondejs-macbook-pro", IP: "100.64.0.2", Owner: "OrganTv12"},
+		{Name: "laptop", IP: "100.64.0.3", Owner: "you"},
+		{Name: "sams-iphone", IP: "100.64.0.4", Owner: "Sam", OS: "iOS"}, // lightdrop doesn't run on phones
+		{Name: "studio", IP: "100.64.0.5", Owner: "Sam", OS: "macOS"},
+	})
+	want := "\n  online, not receiving: ondejs-macbook-pro (OrganTv12), studio (Sam)"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestUnknownOptionIsNotAMissingFile(t *testing.T) {
+	err := sendAll("", []string{"--verbose"})
+	if err == nil || !strings.Contains(err.Error(), "unknown option --verbose") {
+		t.Fatalf("got %v", err)
+	}
+	err = sendAll("", []string{"no-such-file.txt"})
+	if err == nil || !strings.Contains(err.Error(), "no such file or folder") {
+		t.Fatalf("got %v", err)
+	}
+}

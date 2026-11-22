@@ -129,3 +129,42 @@ final class ReceiveFlowTests: XCTestCase {
         XCTAssertEqual(m.incoming?.progress, 0)
     }
 }
+
+/// Where a drop can go, and what the island says when it can't go anywhere.
+@MainActor
+final class TargetTests: XCTestCase {
+    private let sam = Peer(name: "macbook", ip: "100.64.0.2", owner: "Sam Rivera", receiving: false, pic: nil)
+    private let samOn = Peer(name: "studio", ip: "100.64.0.3", owner: "Sam Rivera", receiving: true, pic: nil)
+    private let mine = Peer(name: "laptop", ip: "100.64.0.4", owner: "you", receiving: true, pic: nil)
+    private let server = Peer(name: "nas", ip: "100.64.0.5", owner: "", receiving: false, pic: nil)
+
+    override func setUp() {
+        let suite = "com.lightdrop.notch.tests"
+        UserDefaults.standard.removePersistentDomain(forName: suite)
+        NotchModel.defaults = UserDefaults(suiteName: suite)!
+    }
+
+    func testSplitKeepsOnlyOtherPeople() {
+        let phone = Peer(name: "sams-iphone", ip: "100.64.0.6", owner: "Sam Rivera", receiving: false, pic: nil, os: "iOS")
+        let (on, idle) = Lightdrop.split([sam, samOn, mine, server, phone], own: false)
+        XCTAssertEqual(on, [samOn])
+        XCTAssertEqual(idle, [sam])
+        XCTAssertEqual(Lightdrop.split([sam, samOn, mine, server], own: true).receiving, [samOn, mine])
+    }
+
+    func testOnlineButNotReceivingIsNotOffline() {
+        let m = NotchModel(notchSize: .zero, hasNotch: true)
+        m.idle = [sam]
+        XCTAssertEqual(m.nobodyReason.headline, "Sam isn't receiving")
+        XCTAssertEqual(m.nobodyReason.detail, "macbook is on, but not receiving")
+    }
+
+    func testOfflineAndNobody() {
+        let m = NotchModel(notchSize: .zero, hasNotch: true)
+        XCTAssertEqual(m.nobodyReason.headline, "Nobody's receiving")
+        NotchModel.defaults.set("Sam", forKey: "lastRecipient")
+        XCTAssertEqual(m.nobodyReason.headline, "Sam isn't online")
+        m.idle = [Peer(name: "pc", ip: "100.64.0.7", owner: "Alex Kim", receiving: false, pic: nil)]
+        XCTAssertEqual(m.nobodyReason.headline, "Sam isn't online", "names the person whose photo shows")
+    }
+}
